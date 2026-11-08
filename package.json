@@ -1,0 +1,27 @@
+{
+  "name": "scmjs-plugin-mods",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mod Editor — a mod's tables, strings and scripts edited beside the map; a plugin for the scmJS StarCraft map editor.",
+  "author": "Jeany",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@scm-js/core": "file:../scm-js-mods/core",
+    "mopaq": "^1.6.2"
+  },
+  "devDependencies": {
+    "@scm-js/plugin-api": "^1.67.0",
+    "@types/node": "^24.19.2",
+    "esbuild": "^0.28.2",
+    "monaco-editor": "^0.56.0",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}
