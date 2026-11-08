@@ -36,6 +36,13 @@ one line what it found.
   uses: coloured, with completion of the commands and of image, sprite, sound, weapon and unit ids by name, and go to
   a label. Every change is assembled a moment later; an error is marked on its line, and the script keeps its last
   text that assembled until it assembles again.
+- **Requirements and Buttons** — the mod's `datreq\*.graft` files (GPTP's grafting, which Firegraft's `.fgp` became)
+  as forms. A unit's button set is a row a button: its place on the card (1–9), its icon, the condition that shows it
+  and the action it does, each by name from the game's 67 conditions and 60 actions with what their parameter names
+  (a unit, an upgrade, a technology, a button set), and the tips shown when it is lit and when it is greyed, as the
+  strings in `stat_txt.tbl` they are. A requirement list is lines in words — `current unit is Terran Barracks (111)`,
+  `owns Terran Academy (112)`, `is not lifted off`, `or` — read back as you change them. A mod without grafts takes the
+  game's own from a running test game (they are read out of its memory) and edits those.
 
 **The map follows the mod.** While a mod is open the editor draws from it: the unit palette shows its units and names,
 the settings dialogs its defaults, the map its pictures. Change a unit's hit points and Unit Settings shows the new
@@ -54,6 +61,15 @@ table, an image with no picture, a script no image uses …); click a finding to
 **Play** hands the mod's files that differ from the game's, with the open map, to the play page at `/play/` beside the
 editor (on scmjs.dev), in a tab of its own. A development server of the editor alone has no play page, and the panel
 says so.
+
+**Start Test Game** takes Play's place when the scm-sim plugin is installed (its `scm-sim.live` service): the open map —
+or a blank one — is played with the mod in the play page's tab, and while that game runs alone **every edit goes into
+it**. A table's field is written into the running game between two turns (the marine's hit points, a weapon's damage:
+the next hit takes it); an imported picture is drawn at once; a moved button moves on the card. The animation scripts,
+the sound table and the strings are read by the game once, so those are kept and take effect at the next start (the
+play page's Restart). The status line says which: "applied in the running game", "takes effect at the next start", or
+the page's reason for refusing — a game between people refuses every edit, since a change on one page only would
+make it another game on the others.
 
 ## Developing
 

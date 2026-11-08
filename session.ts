@@ -57,6 +57,9 @@ export interface Refusal { text: string; params?: Params }
 
 export interface FieldEdit { table: DatTableName; id: number; field: string; part?: string; value: number }
 
+/** One edit, as a running test game takes it (`live.ts`): the member it changed, and the field when it was one. */
+export interface EditEvent { member: string; field?: FieldEdit }
+
 const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
 const MAX = { u8: 0xff, u16: 0xffff, u32: 0xffffffff } as const;
 
@@ -81,6 +84,7 @@ export class ModSession {
   /** Bumped on every change; a view redraws when it moved. */
   revision = 0;
   private readonly listeners = new Set<() => void>();
+  private readonly editListeners = new Set<(e: EditEvent) => void>();
   private opened: ModData | null = null;
   private readonly digests = new Map<string, string>();
   /** Whether a member is byte for byte the game's, once asked. */
@@ -103,6 +107,16 @@ export class ModSession {
   onChange(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Called after each edit with what it changed (a field, or a member's bytes). */
+  onEdit(listener: (e: EditEvent) => void): () => void {
+    this.editListeners.add(listener);
+    return () => this.editListeners.delete(listener);
+  }
+
+  private edit(e: EditEvent) {
+    for (const l of this.editListeners) l(e);
   }
 
   private changed(kind: "table" | "strings" | "script" | "file") {
@@ -254,6 +268,7 @@ export class ModSession {
     this.dirtyTables.add(t);
     this.touched(this.tableMember(t));
     this.changed("table");
+    this.edit({ member: gameName(this.tableMember(t)), field: { ...edit } });
   }
 
   /* ── String tables ── */
@@ -294,6 +309,7 @@ export class ModSession {
     this.touched(k);
     if (STRING_KEYS[k]) this.data.stringsFromMod.add(STRING_KEYS[k]);
     this.changed("strings");
+    this.edit({ member: k });
   }
 
   /* ── Scripts ── */
@@ -399,6 +415,7 @@ export class ModSession {
     if (!this.source.files.has(k)) this.added.set(k, member);
     const doc = this.scripts.find((s) => s.members.some((m) => gameName(m) === k));
     if (doc) doc.fromGame = false;
+    this.edit({ member: k });
   }
 
   /**
@@ -413,6 +430,7 @@ export class ModSession {
     this.overrides.set(k, bytes);
     if (!was) this.added.set(k, member);
     this.changed("file");
+    this.edit({ member: k });
   }
 
   /** An overlay opened as text (the game's, for an image whose overlay the mod does not have) becomes a script to edit. */

@@ -13,7 +13,7 @@
  * The codecs and the folder form are `@scm-js/core`'s, the same code the editor and the command line run.
  */
 import type { GameDataProfile, GameDataSource, PanelHandle, PluginApi } from "@scm-js/plugin-api";
-import { DAT_SCHEMAS, type DatTableName, type ModChange, type ModFinding } from "@scm-js/core";
+import { DAT_SCHEMAS, createScenario, serializeScenario, type DatTableName, type ModChange, type ModFinding } from "@scm-js/core";
 import { button, clear, ensureStyle, h } from "./dom";
 import { bindLanguage, msg, t } from "./i18n";
 import { foundLine, num, sizeText } from "./info";
@@ -29,6 +29,8 @@ import { SoundsView } from "./soundsView";
 import { ModSession } from "./session";
 import { OpenError, openPieces, type Piece } from "./source";
 import { StringsView } from "./stringsView";
+import { GraftsView } from "./graftsView";
+import { LIVE_SERVICE, LiveSender, livePath, type LiveService } from "./live";
 import { TablesView, type ViewContext } from "./tablesView";
 
 /** `api.gameData.attach` / `reload`, which `@scm-js/plugin-api` 1.67 does not declare yet (the editor has them since its data sets took a reader). */
@@ -46,7 +48,9 @@ export default function activate(api: PluginApi) {
   api.ui.fileType({ name: t("StarCraft mod"), extensions: [".mpq", ".exe", ".zip"], open: (files) => editor.openFiles(files.map((f) => ({ path: f.name, size: f.size, read: async () => new Uint8Array(await f.arrayBuffer()) })), files[0]?.name ?? "mod") });
   api.events.on("language", () => editor.relabel());
   api.events.on("gameData", () => editor.sourceChanged());
-  return () => editor.close(true);
+  // Live (part d): plugin-scm-sim's `scm-sim.live`, when it is installed, carries edits into a running test game.
+  const watching = api.services.watch<LiveService>(LIVE_SERVICE, (service) => editor.liveService(service));
+  return () => { watching.dispose(); editor.close(true); };
 }
 
 /** What the copy of the game the editor draws from keeps, by its paths: the rest it cannot say anything about. */
@@ -54,7 +58,7 @@ const COPY_HOLDS = /^(arr\/[^/]+$|scripts\/iscript\.bin$|unit\/|tileset\/|game\/
 /** The game's files the plugin keeps once read: small, and read again by every diff, check and string table. */
 const SMALL = /^(arr\/[^/]+$|scripts\/iscript\.bin$|tileset\/stat_txt\.tbl$|rez\/unitnames\.tbl$|unit\/manifest\.json$)/;
 
-type Tab = "tables" | "strings" | "pictures" | "sounds" | "scripts" | "overlays";
+type Tab = "tables" | "strings" | "pictures" | "sounds" | "scripts" | "overlays" | "grafts";
 
 class ModEditor {
   private readonly api: PluginApi;
@@ -69,6 +73,10 @@ class ModEditor {
   private pictures: PicturesView | null = null;
   private sounds: SoundsView | null = null;
   private overlays: ScriptsView | null = null;
+  private grafts: GraftsView | null = null;
+  /** Edits into a running test game (`live.ts`). */
+  private readonly live = new LiveSender(() => this.status());
+  private liveSvc: LiveService | null = null;
   /** The palette and team colour pictures are drawn with, shared by the Pictures tab and the previews. */
   private look: Look | null = null;
   private statusEl: HTMLElement | null = null;
@@ -89,6 +97,13 @@ class ModEditor {
 
   constructor(api: PluginApi) {
     this.api = api;
+  }
+
+  /** The `scm-sim.live` service came or went. */
+  liveService(service: LiveService | null) {
+    this.liveSvc = service && service.present ? service : null;
+    this.live.setService(this.liveSvc);
+    if (this.session) this.draw();
   }
 
   private get gameData(): AttachApi | null {
@@ -120,7 +135,7 @@ class ModEditor {
   /** Every tab's view goes (a language change, another mod); they are made again when shown. */
   private dropViews() {
     this.scripts?.dispose(); this.overlays?.dispose(); this.sounds?.dispose();
-    this.tables = null; this.strings = null; this.scripts = null; this.pictures = null; this.sounds = null; this.overlays = null;
+    this.tables = null; this.strings = null; this.scripts = null; this.pictures = null; this.sounds = null; this.overlays = null; this.grafts = null;
   }
 
   private draw() {
@@ -132,7 +147,7 @@ class ModEditor {
     const s = this.session;
     const tabs = h("div", { className: "mx-tabs" });
     const tabButton = (id: Tab, label: string) => h("button", { className: `mx-tab${this.tab === id ? " on" : ""}`, type: "button", dataset: { tab: id }, onclick: () => { this.tab = id; this.draw(); } }, label);
-    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("pictures", t("Pictures")), tabButton("sounds", t("Sounds")), tabButton("scripts", t("Scripts")), tabButton("overlays", t("Overlays")));
+    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("pictures", t("Pictures")), tabButton("sounds", t("Sounds")), tabButton("scripts", t("Scripts")), tabButton("overlays", t("Overlays")), tabButton("grafts", t("Requirements and Buttons")));
     const bar = h("div", { className: "mx-bar" },
       h("span", { className: "mx-grow", title: this.found }, h("b", null, s.source.name), " ", h("span", { className: "mx-dim" }, this.found.replace(/^[^,]*, /, ""))),
       button(t("Open…"), () => { this.closeMod(); }, { title: t("Close this mod and open another") }),
@@ -143,7 +158,9 @@ class ModEditor {
       h("span", { className: "mx-sep" }),
       button(t("Diff…"), () => this.diffDialog(), { title: t("What changed: against the game, or against the mod as it was opened") }),
       button(t("Check…"), () => void this.checkDialog(), { title: t("Look across the tables for what would break in the game") }),
-      button(t("Play"), () => this.play(), { title: t("Play the mod on the play page, with the open map"), className: "primary" }));
+      this.liveSvc
+        ? button(t("Start Test Game"), () => this.testGame(), { title: t("Play the open map (or a blank one) with the mod in the play page's tab; while it runs, every edit goes into the game"), className: "primary" })
+        : button(t("Play"), () => this.play(), { title: t("Play the mod on the play page, with the open map"), className: "primary" }));
     const view = h("div", { className: "mx-body" });
     body.append(bar, tabs, view, this.statusEl);
     view.append(this.view(this.tab));
@@ -171,6 +188,7 @@ class ModEditor {
     if (tab === "sounds") { this.sounds ??= new SoundsView(this.context()); this.sounds.refresh(); return this.sounds.el; }
     const dist = this.api.storage.get<string>(DIST_STORAGE_KEY, DEFAULT_DIST);
     if (tab === "overlays") { this.overlays ??= new ScriptsView(this.context(), dist, ["overlay"]); this.overlays.refresh(); return this.overlays.el; }
+    if (tab === "grafts") { this.grafts ??= new GraftsView(this.context(), this.liveSvc ? () => this.liveSvc!.grafts() : null); this.grafts.refresh(); return this.grafts.el; }
     this.scripts ??= new ScriptsView(this.context(), dist, ["iscript", "ai"], this.look);
     this.scripts.refresh();
     return this.scripts.el;
@@ -223,6 +241,8 @@ class ModEditor {
     if (!el) return;
     const parts: string[] = [];
     if (this.said) parts.push(this.said);
+    if (this.session && this.liveSvc) parts.push(this.live.alone ? t("Live: a test game is running alone; each edit goes into it.") : t("No test game is running: edits stay in the mod until the next one."));
+    if (this.live.line && this.live.alone) parts.unshift(this.live.line);
     if (this.session) {
       if (this.attached) parts.push(this.attached.label);
       else if (!this.gameData) parts.push(t("This editor cannot draw from a mod in memory; update it to see the edits on the map."));
@@ -261,6 +281,7 @@ class ModEditor {
       this.found = foundLine(source);
       this.tab = "tables";
       session.onChange(() => this.edited());
+      this.live.follow(session);
       this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1000).toFixed(1), found: this.found });
       this.api.ui.status(this.found);
       this.draw();
@@ -282,6 +303,7 @@ class ModEditor {
     this.look = null;
     const ours = !!this.attached && this.isOurs();
     this.session = null;
+    this.live.follow(null);
     this.attached = null;
     this.reader = null;
     clearTimeout(this.update.timer);
@@ -294,6 +316,7 @@ class ModEditor {
   close(disposing = false) {
     this.closeMod(!disposing);
     this.playTab?.dispose();
+    this.live.dispose();
     if (disposing) this.panel?.close();
   }
 
@@ -393,6 +416,7 @@ class ModEditor {
     else if (this.tab === "pictures") this.pictures?.refresh();
     else if (this.tab === "sounds") this.sounds?.refresh();
     else if (this.tab === "overlays") this.overlays?.refresh();
+    else if (this.tab === "grafts") this.grafts?.refresh();
     else this.scripts?.refresh();
     clearTimeout(this.update.timer);
     this.update.timer = window.setTimeout(() => void this.redraw(), 400);
@@ -535,6 +559,40 @@ class ModEditor {
         else if (iscript) { close(); this.tab = "scripts"; this.draw(); void this.scripts!.showIscript(Number(iscript[1])); }
       },
     }, h("span", { className: `lvl ${f.level}` }, f.level === "error" ? "●" : "▲"), h("span", { className: "where" }, f.where), h("span", { className: "why" }, f.why));
+  }
+
+  /* ── A test game, live ── */
+
+  /**
+   * The open map (or a blank one) played with the mod in the play page's tab, through `scm-sim.live`: the page keeps
+   * the mod's files, loads again on them and starts the map. While it runs alone, each edit goes into it (`live.ts`).
+   */
+  private testGame() {
+    const s = this.session, svc = this.liveSvc;
+    if (!s || !svc) return;
+    this.say(t("Handing {name} to the play page…", { name: s.source.name }));
+    // The tab is opened from the click itself: the service opens it before anything is awaited.
+    const test = (async () => {
+      const files = await s.changedFiles();
+      if (!files.length) throw new Error(t("{name} changes nothing of the game here: every file is the game's own.", { name: s.source.name }));
+      const hash = await s.hash();
+      let map: { bytes: Uint8Array; name: string } | null = null, blank = false;
+      if (this.api.document.isOpen()) {
+        const file = await this.api.document.export();
+        if (file) map = { bytes: new Uint8Array(await file.arrayBuffer()), name: file.name };
+      }
+      if (!map) {
+        // A blank map, 64 × 64 badlands, played with its own settings (it has no start locations for a melee game).
+        // (A bare scenario, which the play page takes as it is: no archive writer in the plugin for it.)
+        map = { bytes: serializeScenario(createScenario({ width: 64, height: 64, era: 0, name: t("Blank map") })), name: "blank.chk" };
+        blank = true;
+      }
+      return { map, mod: { name: s.source.name, hash, files: files.map((f) => ({ path: livePath(f.name), bytes: f.bytes })) }, ...(blank ? { useMapSettings: true } : {}) };
+    })();
+    svc.play(test).then(
+      (outcome) => this.say(outcome === "started" ? t("The test game is running with {name}: each edit goes into it.", { name: s.source.name }) : t("The play page has {name}; choose a map there.", { name: s.source.name })),
+      (e) => this.say(t("The play page said: {message}", { message: e instanceof Error ? e.message : String(e) })),
+    );
   }
 
   /* ── Play ── */
