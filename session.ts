@@ -9,6 +9,7 @@ import {
   entryText, fieldType, gameName, iscriptFromText, iscriptToText, loadModData, namesOf, placeOf, readIscriptHeaders, storedRange,
   type AiNames, type DatField, type DatFile, type DatTableName, type DiffSide, type ModChange, type ModData, type ModFinding, type TblFile,
 } from "@scm-js/core";
+import { msg, translate, type Params } from "./i18n";
 import { RefIndex } from "./refs";
 import type { ModSource } from "./source";
 
@@ -51,6 +52,9 @@ export interface ScriptState {
   names?: AiNames;
 }
 
+/** Why an edit was refused: a template, and the values it is filled with. */
+export interface Refusal { text: string; params?: Params }
+
 export interface FieldEdit { table: DatTableName; id: number; field: string; part?: string; value: number }
 
 const equal = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
@@ -64,6 +68,8 @@ export class ModSession {
   data!: ModData;
   refs!: RefIndex;
   private readonly dirtyTables = new Set<DatTableName>();
+  /** Each edited table as it came (or the game's, for one the mod took over), copied before its first edit. */
+  private readonly pristine: Partial<Record<DatTableName, DatFile>> = {};
   private readonly tbl = new Map<string, TblFile>();
   private readonly dirtyStrings = new Set<string>();
   /** Members the mod did not have that an edit gave it, by key → name. */
@@ -77,6 +83,8 @@ export class ModSession {
   private readonly listeners = new Set<() => void>();
   private opened: ModData | null = null;
   private readonly digests = new Map<string, string>();
+  /** Whether a member is byte for byte the game's, once asked. */
+  private readonly baseSame = new Map<string, boolean>();
 
   private constructor(source: ModSource, options: SessionOptions) {
     this.source = source;
@@ -167,6 +175,7 @@ export class ModSession {
     const k = gameName(member);
     this.overrides.delete(k);
     this.digests.delete(k);
+    this.baseSame.delete(k);
   }
 
   /* ── Tables ── */
@@ -201,24 +210,34 @@ export class ModSession {
     return id >= from && id < end;
   }
 
-  /** Why a value cannot go in a field, or null when it can. */
-  refuse(edit: FieldEdit): string | null {
+  /** A field's value as the table came, or null when the table was never edited (so nothing in it differs). */
+  openedValue(t: DatTableName, field: string, part: string | undefined, id: number): number | null {
+    const was = this.pristine[t];
+    if (!was || id >= was.count) return null;
+    const f = DAT_SCHEMAS[t].fields.find((x) => x.name === field);
+    if (!f) return null;
+    const col = was.columns[field];
+    return part && f.parts ? col[id * f.parts.length + f.parts.indexOf(part)] : col[id];
+  }
+
+  /** Why a value cannot go in a field (a template for `translate`, and its values), or null when it can. */
+  refuse(edit: FieldEdit): Refusal | null {
     const file = this.data.tables[edit.table];
-    if (!file) return `the mod has no ${edit.table} table`;
+    if (!file) return { text: msg("The mod has no {table} table."), params: { table: edit.table } };
     const field = DAT_SCHEMAS[edit.table].fields.find((f) => f.name === edit.field);
-    if (!field) return `${edit.table} has no field ${edit.field}`;
-    if (edit.id < 0 || edit.id >= file.count) return `${edit.table} has no entry ${edit.id}`;
-    if (!this.stores(edit.table, field, edit.id)) return `entry ${edit.id} does not store ${edit.field} in this layout`;
-    if (field.parts && (!edit.part || !field.parts.includes(edit.part))) return `${edit.field} is in parts: ${field.parts.join(", ")}`;
+    if (!field) return { text: msg("{table} has no field {field}."), params: { table: edit.table, field: edit.field } };
+    if (edit.id < 0 || edit.id >= file.count) return { text: msg("{table} has no entry {id}."), params: { table: edit.table, id: edit.id } };
+    if (!this.stores(edit.table, field, edit.id)) return { text: msg("Entry {id} does not store {field} in this layout."), params: { id: edit.id, field: edit.field } };
+    if (field.parts && (!edit.part || !field.parts.includes(edit.part))) return { text: msg("{field} is in parts: {parts}."), params: { field: edit.field, parts: field.parts.join(", ") } };
     const type = fieldType(field, file.layout);
-    if (!Number.isInteger(edit.value) || edit.value < 0 || edit.value > MAX[type]) return `${edit.field} holds a whole number from 0 to ${MAX[type].toLocaleString("en")} (${type})`;
+    if (!Number.isInteger(edit.value) || edit.value < 0 || edit.value > MAX[type]) return { text: msg("{field} holds a whole number from 0 to {max} ({type})."), params: { field: edit.field, max: MAX[type].toLocaleString("en"), type } };
     return null;
   }
 
   /** Sets a field (after `refuse` said nothing). A table the mod did not have becomes the mod's own. */
   setField(edit: FieldEdit) {
     const why = this.refuse(edit);
-    if (why) throw new Error(why);
+    if (why) throw new Error(translate(why.text, why.params));
     const t = edit.table;
     if (!this.data.fromMod[t]) {
       const own = decodeDat(t, encodeDat(this.data.tables[t]!), { fileName: DAT_SCHEMAS[t].file });
@@ -227,6 +246,7 @@ export class ModSession {
       this.added.set(gameName(DAT_SCHEMAS[t].file), DAT_SCHEMAS[t].file);
     }
     const file = this.data.tables[t]!;
+    this.pristine[t] ??= cloneDat(file);
     const field = DAT_SCHEMAS[t].fields.find((f) => f.name === edit.field)!;
     const at = field.parts ? edit.id * field.parts.length + field.parts.indexOf(edit.part!) : edit.id;
     if (file.columns[field.name][at] === edit.value) return;
@@ -365,6 +385,7 @@ export class ModSession {
   private putScript(member: string, bytes: Uint8Array) {
     const k = gameName(member);
     this.digests.delete(k);
+    this.baseSame.delete(k);
     this.overrides.set(k, bytes);
     if (!this.source.files.has(k)) this.added.set(k, member);
     const doc = this.scripts.find((s) => s.members.some((m) => gameName(m) === k));
@@ -425,31 +446,39 @@ export class ModSession {
     });
   }
 
-  /**
-   * The members that differ from the game's own (all of them where no copy of the game can say), with their bytes:
-   * what the play page is handed, and what the data set's hash is taken over.
-   */
-  async changedFiles(): Promise<{ name: string; bytes: Uint8Array }[]> {
-    const out: { name: string; bytes: Uint8Array }[] = [];
+  /** The members that differ from the game's own (all of them where no copy of the game can say), by key. */
+  async changedMembers(): Promise<string[]> {
+    const out: string[] = [];
     for (const k of this.members()) {
-      const bytes = await this.read(k);
-      if (!bytes) continue;
-      const has = this.baseHas ? await this.baseHas(k) : null;
-      const theirs = has === false || !this.base ? null : await this.base(k);
-      if (theirs && equal(theirs, bytes)) continue;
-      out.push({ name: this.nameOf(k), bytes });
+      let same = this.baseSame.get(k);
+      if (same === undefined) {
+        const has = this.baseHas ? await this.baseHas(k) : null;
+        const theirs = has === false || !this.base ? null : await this.base(k);
+        const mine = theirs ? await this.read(k) : null;
+        same = !!theirs && !!mine && equal(theirs, mine);
+        this.baseSame.set(k, same);
+      }
+      if (!same && this.has(k)) out.push(k);
     }
     return out;
   }
 
-  /** The data set's hash over the changed files, by the shared rule (sorted `name<TAB>sha256` lines, the first sixteen hex digits). */
-  async hash(files?: { name: string; bytes: Uint8Array }[]): Promise<string> {
-    const list = files ?? await this.changedFiles();
+  /** Those members with their bytes: what the play page is handed. */
+  async changedFiles(): Promise<{ name: string; bytes: Uint8Array }[]> {
+    const out: { name: string; bytes: Uint8Array }[] = [];
+    for (const k of await this.changedMembers()) { const bytes = await this.read(k); if (bytes) out.push({ name: this.nameOf(k), bytes }); }
+    return out;
+  }
+
+  /**
+   * The data set's hash over the changed members, by the shared rule (sorted `name<TAB>sha256` lines, the first sixteen
+   * hex digits). Each member's digest is kept until it changes, so after an edit only that member is read again.
+   */
+  async hash(): Promise<string> {
     const lines: string[] = [];
-    for (const f of list) {
-      const k = gameName(f.name);
+    for (const k of await this.changedMembers()) {
       let d = this.digests.get(k);
-      if (!d) { d = await sha256(f.bytes); this.digests.set(k, d); }
+      if (!d) { const bytes = await this.read(k); if (!bytes) continue; d = await sha256(bytes); this.digests.set(k, d); }
       lines.push(`${k}\t${d}`);
     }
     lines.sort((a, b) => { const x = a.split("\t")[0], y = b.split("\t")[0]; return x < y ? -1 : x > y ? 1 : 0; });
@@ -506,6 +535,8 @@ export class ModSession {
     return DAT_SCHEMAS[t].fields.find((f) => f.name === field)?.ref;
   }
 }
+
+const cloneDat = (file: DatFile): DatFile => ({ ...file, columns: Object.fromEntries(Object.entries(file.columns).map(([k, v]) => [k, v.slice()])) });
 
 async function sha256(bytes: Uint8Array): Promise<string> {
   const d = await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>);

@@ -59,15 +59,15 @@ export function sizeText(bytes: number): string {
 
 function kindText(kind: ModKind, n: number): string {
   switch (kind) {
-    case "tables": return t("{n, plural, one {# table} other {# tables}}", { n });
-    case "scripts": return t("{n, plural, one {# script} other {# scripts}}", { n });
-    case "pictures": return t("{n, plural, one {# picture} other {# pictures}}", { n });
-    case "sounds": return t("{n, plural, one {# sound} other {# sounds}}", { n });
-    case "terrain": return t("{n, plural, one {# terrain file} other {# terrain files}}", { n });
-    case "strings": return t("{n, plural, one {# string table} other {# string tables}}", { n });
-    case "AI": return t("{n, plural, one {# AI script} other {# AI scripts}}", { n });
-    case "maps": return t("{n, plural, one {# map} other {# maps}}", { n });
-    default: return t("{n, plural, one {# other file} other {# other files}}", { n });
+    case "tables": return t("{n, plural, one {{count} table} other {{count} tables}}", { n, count: num(n) });
+    case "scripts": return t("{n, plural, one {{count} script} other {{count} scripts}}", { n, count: num(n) });
+    case "pictures": return t("{n, plural, one {{count} picture} other {{count} pictures}}", { n, count: num(n) });
+    case "sounds": return t("{n, plural, one {{count} sound} other {{count} sounds}}", { n, count: num(n) });
+    case "terrain": return t("{n, plural, one {{count} terrain file} other {{count} terrain files}}", { n, count: num(n) });
+    case "strings": return t("{n, plural, one {{count} string table} other {{count} string tables}}", { n, count: num(n) });
+    case "AI": return t("{n, plural, one {{count} AI script} other {{count} AI scripts}}", { n, count: num(n) });
+    case "maps": return t("{n, plural, one {{count} map} other {{count} maps}}", { n, count: num(n) });
+    default: return t("{n, plural, one {{count} other file} other {{count} other files}}", { n, count: num(n) });
   }
 }
 
@@ -89,12 +89,12 @@ export function foundLine(source: ModSource): string {
   const units = s.extended.find((e) => /units\.dat/i.test(e.member));
   if (s.extended.length) {
     parts.push(s.extended.every((e) => e.layout === "datex")
-      ? t("{n, plural, one {# table} other {# tables}} in GPTP's .datex layout", { n: s.extended.length })
-      : t("{n, plural, one {# table} other {# tables}} wider than the game's", { n: s.extended.length }));
+      ? t("{n, plural, one {{count} table} other {{count} tables}} in GPTP's .datex layout", { n: s.extended.length, count: num(s.extended.length) })
+      : t("{n, plural, one {{count} table} other {{count} tables}} wider than the game's", { n: s.extended.length, count: num(s.extended.length) }));
     if (units) parts[parts.length - 1] += t(" ({n} unit types, the game has {standard})", { n: num(units.entries), standard: num(DAT_SCHEMAS.units.entries) }) + ".";
     else parts[parts.length - 1] += ".";
   }
   const carried = source.plugins.length + source.firegraft.length;
-  if (carried) parts.push(t("{n, plural, one {# plugin or FireGraft file} other {# plugins or FireGraft files}} kept, not run.", { n: carried }));
+  if (carried) parts.push(t("{n, plural, one {{count} plugin or FireGraft file} other {{count} plugins or FireGraft files}} kept, not run.", { n: carried, count: num(carried) }));
   return parts.join(" ");
 }

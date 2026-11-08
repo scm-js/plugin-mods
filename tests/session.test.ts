@@ -46,8 +46,8 @@ describe("a made mod, opened", () => {
 describe("an edit", () => {
   it("the marine's hit points, encoded back and read; the rest byte for byte as it came", async () => {
     const s = await open();
-    expect(s.refuse({ table: "units", id: 0, field: "hit_points", value: -1 })).toMatch(/whole number/);
-    expect(s.refuse({ table: "units", id: 0, field: "shield_amount", value: 70000 })).toMatch(/0 to 65,535/);
+    expect(s.refuse({ table: "units", id: 0, field: "hit_points", value: -1 })?.text).toMatch(/whole number/);
+    expect(s.refuse({ table: "units", id: 0, field: "shield_amount", value: 70000 })?.params?.max).toBe("65,535");
     s.setField({ table: "units", id: 0, field: "hit_points", value: 45 * 256 });
     const units = decodeDat("units", (await s.read("arr\\units.dat"))!);
     expect(units.columns.hit_points[0]).toBe(45 * 256);
@@ -116,7 +116,9 @@ describe("what the editor is handed", () => {
     s.setField({ table: "units", id: 0, field: "hit_points", value: 45 * 256 });
     const files = await s.changedFiles();
     expect(files.length).toBe(5);
-    expect(await s.hash(files)).toBe(await dataSetHash(files));
+    expect(await s.hash()).toBe(await dataSetHash(files));
+    s.setField({ table: "units", id: 0, field: "hit_points", value: 50 * 256 });
+    expect(await s.hash()).toBe(await dataSetHash(await s.changedFiles()));
   });
 });
 

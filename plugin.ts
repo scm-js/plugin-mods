@@ -1,0 +1,560 @@
+/**
+ * Mod Editor — a plugin for the scmJS map editor (https://github.com/scm-js/scm-js).
+ *
+ * File ▸ Open a Mod… (or a mod's folder, `.mpq`, `.exe` or `.zip` dropped on the panel, or an `.mpq` / `.exe` /
+ * `.zip` dropped on the editor) opens a mod into a panel under the map, with three tabs: Tables (a grid a table, every
+ * field under its PyMS name, search, what each entry points at and what points at it, values edited in place),
+ * Strings (the TBLs, `<NN>` escapes as PyTBL writes them) and Scripts (iscript and AI scripts as PyICE and PyAI text in
+ * Monaco, assembled on every change). The editor draws from the mod while it is open — `api.gameData.attach` with a
+ * reader over the mod's current files — so a change to a unit's hit points shows in Unit Settings' default at once.
+ * Save writes the mod back in the form it came (an MPQ, or a folder of text as `scmjs mod unpack` lays one out),
+ * Diff and Check read it the way `scmjs mod diff` and `mod check` do, and Play hands it to the play page.
+ *
+ * The codecs and the folder form are `@scm-js/core`'s, the same code the editor and the command line run.
+ */
+import type { GameDataProfile, GameDataSource, PanelHandle, PluginApi } from "@scm-js/plugin-api";
+import { DAT_SCHEMAS, type DatTableName, type ModChange, type ModFinding } from "@scm-js/core";
+import { button, clear, ensureStyle, h } from "./dom";
+import { bindLanguage, msg, t } from "./i18n";
+import { foundLine, num, sizeText } from "./info";
+import { KO } from "./ko";
+import { DEFAULT_DIST, DIST_STORAGE_KEY } from "./monaco";
+import { PlayTab, playAddress, playMessage, playPageThere } from "./play";
+import { attachReader, storedPathOf, type UnitManifest } from "./reader";
+import { changedZip, currentMembers, textFolder, writeMpq, writeZip } from "./save";
+import { ScriptsView } from "./scriptsView";
+import { ModSession } from "./session";
+import { OpenError, openPieces, type Piece } from "./source";
+import { StringsView } from "./stringsView";
+import { TablesView, type ViewContext } from "./tablesView";
+
+/** `api.gameData.attach` / `reload`, which `@scm-js/plugin-api` 1.67 does not declare yet (the editor has them since its data sets took a reader). */
+interface AttachApi {
+  attach(profile: GameDataProfile, read: (path: string) => Promise<Uint8Array | null>, options?: { hash?: string }): Promise<GameDataSource & { hash?: string }>;
+  reload(): void;
+}
+
+export default function activate(api: PluginApi) {
+  api.i18n.register({ ko: KO });
+  bindLanguage(api);
+  const editor = new ModEditor(api);
+  api.commands.register({ id: "open", title: msg("Open a Mod…"), run: (...args: unknown[]) => editor.openCommand(args[0]) });
+  api.menu.add("File", { label: msg("Open a Mod…"), after: "Open Recent", command: "open" });
+  api.ui.fileType({ name: t("StarCraft mod"), extensions: [".mpq", ".exe", ".zip"], open: (files) => editor.openFiles(files.map((f) => ({ path: f.name, size: f.size, read: async () => new Uint8Array(await f.arrayBuffer()) })), files[0]?.name ?? "mod") });
+  api.events.on("language", () => editor.relabel());
+  api.events.on("gameData", () => editor.sourceChanged());
+  return () => editor.close(true);
+}
+
+/** What the copy of the game the editor draws from keeps, by its paths: the rest it cannot say anything about. */
+const COPY_HOLDS = /^(arr\/[^/]+$|scripts\/iscript\.bin$|unit\/|tileset\/|game\/|rez\/unitnames\.tbl$)/;
+
+type Tab = "tables" | "strings" | "scripts";
+
+class ModEditor {
+  private readonly api: PluginApi;
+  private panel: PanelHandle | null = null;
+  private body: HTMLElement | null = null;
+  private session: ModSession | null = null;
+  private found = "";
+  private tab: Tab = "tables";
+  private tables: TablesView | null = null;
+  private strings: StringsView | null = null;
+  private scripts: ScriptsView | null = null;
+  private statusEl: HTMLElement | null = null;
+  private said = "";
+  /** Draw-from state: the profile handed to `attach`, the hash it carries, and the set in use before. */
+  private attached: { profile: GameDataProfile; hash: string | null; label: string } | null = null;
+  private before: string | null = null;
+  private reader: ReturnType<typeof attachReader> | null = null;
+  private quiet = 0;
+  private baseManifest: (UnitManifest & { grps?: string[]; overlays?: string[] }) | null = null;
+  private update = { timer: 0, running: false, again: false };
+  private playTab: PlayTab | null = null;
+  private playThere: Promise<boolean> | null = null;
+  private opening = false;
+
+  constructor(api: PluginApi) {
+    this.api = api;
+  }
+
+  private get gameData(): AttachApi | null {
+    const g = this.api.gameData as unknown as Partial<AttachApi>;
+    return typeof g.attach === "function" && typeof g.reload === "function" ? (g as AttachApi) : null;
+  }
+
+  /* ── The panel ── */
+
+  private ensurePanel() {
+    ensureStyle();
+    if (this.panel?.isOpen()) return;
+    this.panel = this.api.ui.panel({
+      title: t("Mod Editor"),
+      dock: "bottom",
+      height: 340,
+      mount: (body) => { this.body = h("div", { className: "mx" }); body.append(this.body); this.draw(); },
+      onClose: () => { this.panel = null; this.body = null; },
+    });
+  }
+
+  relabel() {
+    this.panel?.setTitle(t("Mod Editor"));
+    if (this.session) this.found = foundLine(this.session.source);
+    this.tables = null; this.strings = null;
+    this.scripts?.dispose(); this.scripts = null;
+    this.draw();
+  }
+
+  private draw() {
+    const body = this.body;
+    if (!body) return;
+    clear(body);
+    this.statusEl = h("div", { className: "mx-status" });
+    if (!this.session) { body.append(this.openScreen(), this.statusEl); this.status(); return; }
+    const s = this.session;
+    const tabs = h("div", { className: "mx-tabs" });
+    const tabButton = (id: Tab, label: string) => h("button", { className: `mx-tab${this.tab === id ? " on" : ""}`, type: "button", dataset: { tab: id }, onclick: () => { this.tab = id; this.draw(); } }, label);
+    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("scripts", t("Scripts")));
+    const bar = h("div", { className: "mx-bar" },
+      h("span", { className: "mx-grow", title: this.found }, h("b", null, s.source.name), " ", h("span", { className: "mx-dim" }, this.found.replace(/^[^,]*, /, ""))),
+      button(t("Open…"), () => { this.closeMod(); }, { title: t("Close this mod and open another") }),
+      h("span", { className: "mx-sep" }),
+      button(t("Save"), () => void this.save("same"), { title: this.saveTitle() }),
+      button(t("Save as Folder"), () => void this.save("folder"), { title: t("The mod as a folder of text and pictures (scmjs mod unpack's form), in a zip") }),
+      button(t("Export as MPQ"), () => void this.save("mpq"), { title: t("The mod as an MPQ the launchers load") }),
+      h("span", { className: "mx-sep" }),
+      button(t("Diff…"), () => this.diffDialog(), { title: t("What changed: against the game, or against the mod as it was opened") }),
+      button(t("Check…"), () => void this.checkDialog(), { title: t("Look across the tables for what would break in the game") }),
+      button(t("Play"), () => this.play(), { title: t("Play the mod on the play page, with the open map"), className: "primary" }));
+    const view = h("div", { className: "mx-body" });
+    body.append(bar, tabs, view, this.statusEl);
+    view.append(this.view(this.tab));
+    this.status();
+  }
+
+  private context(): ViewContext {
+    return {
+      session: this.session!,
+      say: (text) => this.say(text),
+      go: (table, id, field) => this.go(table, id, field),
+      goScript: (id) => { this.tab = "scripts"; this.draw(); void this.scripts!.showIscript(id); },
+      goString: (member, entry) => { this.tab = "strings"; this.draw(); void this.strings!.show(member, entry); },
+    };
+  }
+
+  private view(tab: Tab): HTMLElement {
+    if (tab === "tables") { this.tables ??= new TablesView(this.context()); this.tables.refresh(); return this.tables.el; }
+    if (tab === "strings") { this.strings ??= new StringsView(this.context()); this.strings.refresh(); return this.strings.el; }
+    this.scripts ??= new ScriptsView(this.context(), this.api.storage.get<string>(DIST_STORAGE_KEY, DEFAULT_DIST));
+    this.scripts.refresh();
+    return this.scripts.el;
+  }
+
+  private go(table: DatTableName, id: number, field?: string) {
+    this.tab = "tables";
+    this.draw();
+    this.tables!.show(table, id, field);
+  }
+
+  private openScreen(): HTMLElement {
+    const folder = h("input", { type: "file", multiple: true, style: "display: none" }) as HTMLInputElement;
+    folder.setAttribute("webkitdirectory", "");
+    folder.addEventListener("change", () => {
+      const files = [...(folder.files ?? [])];
+      if (files.length) void this.openFiles(files.map(filePiece), (files[0].webkitRelativePath || files[0].name).split("/")[0]);
+      folder.value = "";
+    });
+    const zone = h("div", { className: "mx-empty", dataset: { drop: "mods" } },
+      h("div", null, t("Drop a mod here: its folder, an .mpq, a mod's .exe or a .zip.")),
+      h("div", { className: "mx-dim" }, t("Nothing of an .exe is run; its archive is read.")),
+      h("div", { className: "mx-bar", style: "justify-content: center" },
+        button(t("Choose a Folder…"), () => folder.click(), { primary: true }),
+        button(t("Choose a File…"), () => void this.pickFile())),
+      folder);
+    zone.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add("over"); });
+    zone.addEventListener("dragleave", () => zone.classList.remove("over"));
+    zone.addEventListener("drop", (e) => {
+      e.preventDefault(); e.stopPropagation(); zone.classList.remove("over");
+      void droppedPieces(e.dataTransfer).then((d) => { if (d.pieces.length) void this.openFiles(d.pieces, d.name); });
+    });
+    return zone;
+  }
+
+  private async pickFile() {
+    const files = await this.api.ui.pickFiles({ accept: ".mpq,.exe,.zip", multiple: false });
+    if (files.length) await this.openFiles(files.map(filePiece), files[0].name);
+  }
+
+  /* ── Status ── */
+
+  private say(text: string) {
+    this.said = text;
+    this.status();
+  }
+
+  private status() {
+    const el = this.statusEl;
+    if (!el) return;
+    const parts: string[] = [];
+    if (this.said) parts.push(this.said);
+    if (this.session) {
+      if (this.attached) parts.push(this.attached.label);
+      else if (!this.gameData) parts.push(t("This editor cannot draw from a mod in memory; update it to see the edits on the map."));
+      else parts.push(t("The editor is not drawing from this mod now."));
+    }
+    el.textContent = parts.join("  ·  ");
+    el.title = el.textContent;
+  }
+
+  /* ── Opening ── */
+
+  /** `mods.open` for another plugin or a script: no argument opens the panel; `File[]` (or `{ path, file }[]`) opens those. */
+  async openCommand(arg?: unknown) {
+    this.ensurePanel();
+    if (!Array.isArray(arg) || !arg.length) return;
+    const pieces: Piece[] = arg.map((x: File | { path: string; file: File }) => (x instanceof File ? filePiece(x) : { path: x.path, size: x.file.size, read: async () => new Uint8Array(await x.file.arrayBuffer()) }));
+    const first = arg[0] instanceof File ? ((arg[0] as File).webkitRelativePath || (arg[0] as File).name) : (arg[0] as { path: string }).path;
+    await this.openFiles(pieces, pieces.length > 1 ? first.split("/")[0] : first);
+  }
+
+  async openFiles(pieces: Piece[], name: string) {
+    if (this.opening) return;
+    this.ensurePanel();
+    if (this.session && !(await this.api.ui.confirm(t("Close {name} and open another mod? Changes not saved are lost.", { name: this.session.source.name })))) return;
+    this.opening = true;
+    this.closeMod(false);
+    this.say(t("Opening {name}…", { name }));
+    try {
+      const t0 = performance.now();
+      const base = this.api.gameData.source()?.kind === "none" ? null : (member: string) => this.baseRead(member);
+      if (base) await this.readBaseManifest();
+      const source = await openPieces(pieces, name, base);
+      const session = await ModSession.open(source, { base, baseHas: base ? (m) => this.baseHas(m) : undefined });
+      this.session = session;
+      this.found = foundLine(source);
+      this.tab = "tables";
+      session.onChange(() => this.edited());
+      this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1000).toFixed(1), found: this.found });
+      this.api.ui.status(this.found);
+      this.draw();
+      await this.attach(true);
+    } catch (e) {
+      this.session = null;
+      this.say(e instanceof OpenError ? e.message : t("The mod could not be opened: {error}", { error: e instanceof Error ? e.message : String(e) }));
+      this.draw();
+    } finally {
+      this.opening = false;
+    }
+  }
+
+  private closeMod(redraw = true) {
+    this.scripts?.dispose();
+    this.tables = null; this.strings = null; this.scripts = null;
+    const was = this.attached;
+    this.session = null;
+    this.attached = null;
+    this.reader = null;
+    clearTimeout(this.update.timer);
+    // Put the editor back on the data set it drew from before, if nothing else moved it meanwhile.
+    if (was && this.isOurs()) void this.api.gameData.select(this.before ?? "default").catch(() => undefined);
+    this.said = "";
+    if (redraw) this.draw();
+  }
+
+  close(disposing = false) {
+    this.closeMod(!disposing);
+    this.playTab?.dispose();
+    if (disposing) this.panel?.close();
+  }
+
+  /* ── The game's own files, read past the mod ── */
+
+  private async baseRead(member: string): Promise<Uint8Array | null> {
+    const stored = storedPathOf(member);
+    if (!COPY_HOLDS.test(stored)) return null;
+    // While the mod is attached every read goes through it first: say nothing for a moment, so the copy answers.
+    this.quiet++;
+    try { return await this.api.gameData.read(stored); } finally { this.quiet--; }
+  }
+
+  private async readBaseManifest() {
+    const bytes = await this.baseRead("unit\\manifest.json");
+    try { this.baseManifest = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : null; } catch { this.baseManifest = null; }
+  }
+
+  /** Whether the copy has a member, from its unit manifest where that lists it (no fetch), else by reading it. */
+  private async baseHas(member: string): Promise<boolean | null> {
+    const stored = storedPathOf(member);
+    if (!COPY_HOLDS.test(stored)) return null;
+    const m = this.baseManifest;
+    const under = stored.startsWith("unit/") && !stored.startsWith("unit/cmdbtns/") ? stored.slice(5).replace(/\//g, "\\") : null;
+    if (under && m?.grps && /\.grp$/.test(under)) return m.grps.some((g) => g.toLowerCase() === under);
+    if (under && m?.overlays && /\.lo[a-z]$/.test(under)) return m.overlays.some((g) => g.toLowerCase() === under);
+    return !!(await this.baseRead(member));
+  }
+
+  /* ── Drawing from the mod ── */
+
+  private profile(): GameDataProfile {
+    const name = this.session!.source.name;
+    const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "mod";
+    return { id, name };
+  }
+
+  private isOurs(): boolean {
+    const s = this.api.gameData.source() as { kind: string; profile: GameDataProfile } | null;
+    return !!s && s.kind === "reader" && !!this.attached && s.profile.id === this.attached.profile.id;
+  }
+
+  /**
+   * Hands the editor a reader over the mod's current files. The hash (over the files that differ from the game's)
+   * is what a map saved now records; it is worked out once the editor already draws from the mod when the mod is
+   * large, and the reader is handed over again with it.
+   */
+  private async attach(first: boolean) {
+    const gd = this.gameData;
+    const session = this.session;
+    if (!gd || !session) { this.status(); return; }
+    if (first) {
+      const now = this.api.gameData.source() as { kind: string; profile: GameDataProfile } | null;
+      this.before = now && now.kind !== "reader" ? now.profile.id : this.before;
+      this.reader = attachReader({ members: () => session.members(), read: (m) => session.read(m), baseManifest: this.baseManifest }, () => this.quiet > 0);
+    }
+    const profile = this.profile();
+    const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
+    let hash: string | null = null;
+    if (!first || bytes < 64 * 1024 * 1024) hash = await session.hash();
+    if (this.session !== session) return;
+    const source = await gd.attach(profile, this.reader!.reader, hash ? { hash } : undefined);
+    this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
+    this.status();
+    if (!hash) {
+      this.say(t("Working out the mod's hash over {size}…", { size: sizeText(bytes) }));
+      const later = await session.hash();
+      if (this.session !== session) return;
+      const again = await gd.attach(profile, this.reader!.reader, { hash: later });
+      this.attached = { profile, hash: later, label: this.attachedLabel(again.label, later) };
+      this.say(t("The mod's hash is {hash}.", { hash: later }));
+    }
+  }
+
+  private attachedLabel(label: string, hash: string | null): string {
+    return t("{label}{hash}: the unit palette, the settings dialogs' defaults and the units drawn follow the mod's files as you edit them.", { label, hash: hash ? ` (${hash})` : "" });
+  }
+
+  /** The editor's data set moved: another was chosen, or ours came back. */
+  sourceChanged() {
+    if (!this.attached || this.isOurs()) return;
+    this.attached = null;
+    this.say(t("Another data set was chosen, so the editor no longer draws from {name}. Edit anything to draw from it again.", { name: this.session?.source.name ?? "" }));
+  }
+
+  /** An edit: redraw the views, and a moment later have the editor read the mod's files again. */
+  private edited() {
+    if (this.tab === "tables") this.tables?.refresh();
+    else if (this.tab === "strings") this.strings?.refresh();
+    else this.scripts?.refresh();
+    clearTimeout(this.update.timer);
+    this.update.timer = window.setTimeout(() => void this.redraw(), 400);
+  }
+
+  private async redraw() {
+    if (this.update.running) { this.update.again = true; return; }
+    const gd = this.gameData, session = this.session;
+    if (!gd || !session || !this.reader) return;
+    this.update.running = true;
+    try {
+      this.reader.invalidate();
+      const hash = await session.hash();
+      if (this.session !== session) return;
+      // A new hash is handed over with the reader (which also reads everything again); the same one needs a reload only.
+      if (!this.attached || !this.isOurs() || hash !== this.attached.hash) {
+        const profile = this.profile();
+        const source = await gd.attach(profile, this.reader.reader, { hash });
+        this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
+      } else gd.reload();
+      const edited = await session.edited();
+      this.said = edited.length ? t("{n, plural, one {{count} file edited} other {{count} files edited}}: {files}.", { n: edited.length, count: num(edited.length), files: edited.slice(0, 4).map((k) => session.nameOf(k)).join(", ") + (edited.length > 4 ? " …" : "") }) : t("No file differs from the mod as it was opened.");
+      this.status();
+    } finally {
+      this.update.running = false;
+      if (this.update.again) { this.update.again = false; void this.redraw(); }
+    }
+  }
+
+  /* ── Save, export ── */
+
+  private saveTitle(): string {
+    const kind = this.session?.source.kind;
+    return kind === "mod folder" ? t("The folder of text and pictures, in a zip") : kind === "folder" ? t("The files you changed, in their folders, in a zip: copy them over the mod's folder") : t("The mod as an MPQ");
+  }
+
+  private async save(how: "same" | "folder" | "mpq") {
+    const s = this.session;
+    if (!s) return;
+    const errors = s.scriptErrors();
+    if (errors.length && !(await this.api.ui.confirm(t("{n, plural, one {{count} script does not assemble} other {{count} scripts do not assemble}} ({first}); the last text that did is what is saved. Save anyway?", { n: errors.length, count: num(errors.length), first: t("{file}, line {line}", { file: errors[0].doc.label, line: errors[0].error.line }) })))) return;
+    const form = how === "same" ? (s.source.kind === "mod folder" ? "folder" : s.source.kind === "folder" ? "changes" : "mpq") : how;
+    const progress = this.api.ui.progress(t("Writing {name}…", { name: s.source.name }));
+    try {
+      let bytes: Uint8Array, fileName: string, what: string;
+      if (form === "mpq") {
+        const members = await currentMembers(s);
+        progress.report(0.3, t("Packing {n} files…", { n: num(members.length) }));
+        bytes = await writeMpq(members);
+        fileName = `${s.source.name}.mpq`;
+        what = t("{n} files in an MPQ, {size}", { n: num(members.length), size: sizeText(bytes.length) });
+      } else if (form === "folder") {
+        const { files, manifest } = await textFolder(s, (done, total) => progress.report(done / total * 0.9, t("{done} of {total} files…", { done: num(done), total: num(total) })));
+        bytes = writeZip(files, s.source.name);
+        fileName = `${s.source.name}.zip`;
+        const kept = manifest.kept.reduce((n, k) => n + k.files.length, 0);
+        what = t("{n} files of text and pictures in a zip, {size}{kept}", { n: num(files.length), size: sizeText(bytes.length), kept: kept ? t("; {k} kept as bytes (mod.json says why)", { k: num(kept) }) : "" });
+      } else {
+        const changed = await changedZip(s);
+        if (!changed.count) { this.say(t("No file differs from the mod as it was opened: nothing to save.")); return; }
+        bytes = changed.zip;
+        fileName = `${s.source.name}-changes.zip`;
+        what = t("{n, plural, one {{count} changed file} other {{count} changed files}} in a zip, to copy over the mod's folder", { n: changed.count, count: num(changed.count) });
+      }
+      progress.report(0.95, t("Saving…"));
+      const where = await this.api.ui.saveFile(bytes, fileName);
+      this.say(where ? t("Saved {file}: {what}.", { file: where.fileName, what }) : t("Not saved."));
+    } catch (e) {
+      this.say(t("Not saved: {error}", { error: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      progress.done();
+    }
+  }
+
+  /* ── Diff and Check ── */
+
+  private diffDialog() {
+    const s = this.session;
+    if (!s) return;
+    let against: "game" | "opened" = s.base ? "game" : "opened";
+    let lines: ModChange[] = [];
+    this.api.ui.dialog({
+      title: t("What changed in {name}", { name: s.source.name }),
+      size: "lg",
+      tall: true,
+      mount: (body) => {
+        const pick = h("select", { onchange: () => { against = pick.value as "game" | "opened"; void fill(); } },
+          h("option", { value: "game", disabled: !s.base }, t("Against the game")), h("option", { value: "opened" }, t("Against the mod as it was opened")));
+        pick.value = against;
+        const count = h("span", { className: "mx-dim" });
+        const out = h("pre", { className: "mx-lines" });
+        body.append(h("div", { className: "mx mx-dlg" }, h("div", { className: "mx-bar" }, pick, count), out));
+        const fill = async () => {
+          count.textContent = t("Reading…");
+          out.textContent = "";
+          lines = await s.diff(against);
+          count.textContent = t("{n, plural, one {{count} change} other {{count} changes}}", { n: lines.length, count: num(lines.length) });
+          out.textContent = lines.length ? lines.map((c) => c.text).join("\n") : t("Nothing differs.");
+        };
+        void fill();
+      },
+      buttons: [
+        { label: t("Copy"), closes: false, run: async () => { await navigator.clipboard.writeText(lines.map((c) => c.text).join("\n")).catch(() => undefined); this.api.ui.toast({ kind: "ok", title: t("Copied") }); } },
+        { label: t("Close"), primary: true },
+      ],
+    });
+  }
+
+  private async checkDialog() {
+    const s = this.session;
+    if (!s) return;
+    this.say(t("Checking…"));
+    const findings = await s.check();
+    const errors = findings.filter((f) => f.level === "error").length;
+    this.say(findings.length ? t("Check: {e} errors, {w} warnings.", { e: num(errors), w: num(findings.length - errors) }) : t("Check: nothing found."));
+    const dialog = this.api.ui.dialog({
+      title: t("Check {name}", { name: s.source.name }),
+      size: "lg",
+      tall: findings.length > 12,
+      mount: (body) => {
+        const root = h("div", { className: "mx mx-dlg" });
+        body.append(root);
+        if (!findings.length) { root.append(h("p", null, t("Nothing found: every reference lands in its table, every picture and script the mod's images name is there."))); return; }
+        root.append(h("p", { className: "mx-dim" }, t("{e} errors (what breaks or shows nothing in the game) and {w} warnings (what is probably a mistake). Click one to go to it.", { e: num(errors), w: num(findings.length - errors) })));
+        const list = h("div", { style: "overflow: auto; flex: 1; min-height: 0" });
+        for (const f of findings) list.append(this.findingRow(f, () => dialog.close()));
+        root.append(list);
+      },
+      buttons: [{ label: t("Close"), primary: true }],
+    });
+  }
+
+  private findingRow(f: ModFinding, close: () => void): HTMLElement {
+    const m = /^(units|weapons|flingy|sprites|images|upgrades|techdata|orders|sfxdata|portdata|mapdata) (\d+)(?: \([^)]*\))?(?: (\S+))?$/.exec(f.where);
+    const iscript = /^iscript (\d+)$/.exec(f.where);
+    return h("div", {
+      className: "mx-finding", title: f.rule,
+      onclick: () => {
+        if (m && DAT_SCHEMAS[m[1] as DatTableName]) { close(); this.go(m[1] as DatTableName, Number(m[2]), m[3]); }
+        else if (iscript) { close(); this.tab = "scripts"; this.draw(); void this.scripts!.showIscript(Number(iscript[1])); }
+      },
+    }, h("span", { className: `lvl ${f.level}` }, f.level === "error" ? "●" : "▲"), h("span", { className: "where" }, f.where), h("span", { className: "why" }, f.why));
+  }
+
+  /* ── Play ── */
+
+  private play() {
+    const s = this.session;
+    if (!s) return;
+    const address = playAddress();
+    this.playThere ??= playPageThere(address);
+    // The tab is opened from the click itself; a browser refuses a tab opened after the work that follows.
+    this.playTab ??= new PlayTab(address);
+    void this.playThere.then(async (there) => {
+      if (!there) { this.say(t("There is no play page at {address}: it is served beside the editor on scmjs.dev, not by a development server of the editor alone.", { address })); return; }
+      if (!this.playTab!.openTab()) { this.say(t("The browser did not open the play page's tab. Allow pop-ups for this page and press Play again.")); return; }
+      this.say(t("Handing {name} to the play page…", { name: s.source.name }));
+      const files = await s.changedFiles();
+      if (!files.length) { this.say(t("{name} changes nothing of the game here: every file is the game's own.", { name: s.source.name })); return; }
+      const hash = await s.hash();
+      let map: { bytes: Uint8Array; name: string } | null = null;
+      if (this.api.document.isOpen()) {
+        const file = await this.api.document.export();
+        if (file) map = { bytes: new Uint8Array(await file.arrayBuffer()), name: file.name };
+      }
+      try {
+        const outcome = await this.playTab!.play(playMessage({ name: s.source.name, hash, files, map }));
+        this.say(outcome === "started"
+          ? t("Playing {map} with {name} ({n} files, {hash}).", { map: map?.name ?? "", name: s.source.name, n: num(files.length), hash })
+          : t("The play page has {name} ({n} files, {hash}); choose a map there.", { name: s.source.name, n: num(files.length), hash }));
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        this.say(why === "timeout" ? t("The play page did not answer. Is it open in another tab?") : t("The play page said: {message}", { message: why }));
+      }
+    });
+  }
+}
+
+/** A picked or dropped `File` as a piece, under its folder path when the picker gave one. */
+function filePiece(f: File): Piece {
+  return { path: f.webkitRelativePath || f.name, size: f.size, read: async () => new Uint8Array(await f.arrayBuffer()) };
+}
+
+/** What was dropped, folders walked: each file under its path from the dropped folder. */
+async function droppedPieces(transfer: DataTransfer | null): Promise<{ pieces: Piece[]; name: string }> {
+  if (!transfer) return { pieces: [], name: "" };
+  const entries = [...transfer.items].map((i) => i.webkitGetAsEntry?.()).filter((e): e is FileSystemEntry => !!e);
+  if (!entries.length) return { pieces: [...transfer.files].map(filePiece), name: transfer.files[0]?.name ?? "" };
+  const pieces: Piece[] = [];
+  const walk = async (entry: FileSystemEntry): Promise<void> => {
+    if (entry.isFile) {
+      const file = await new Promise<File>((resolve, reject) => (entry as FileSystemFileEntry).file(resolve, reject));
+      pieces.push({ path: entry.fullPath.replace(/^\/+/, ""), size: file.size, read: async () => new Uint8Array(await file.arrayBuffer()) });
+    } else if (entry.isDirectory) {
+      const reader = (entry as FileSystemDirectoryEntry).createReader();
+      for (;;) {
+        const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!batch.length) break;
+        for (const e of batch) await walk(e);
+      }
+    }
+  };
+  for (const e of entries) await walk(e);
+  return { pieces, name: entries[0].name };
+}
