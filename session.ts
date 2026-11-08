@@ -262,7 +262,9 @@ export class ModSession {
   stringFiles(): { member: string; fromGame: boolean }[] {
     const own = this.members().filter((k) => k.endsWith(".tbl")).map((member) => ({ member, fromGame: false }));
     const game = this.base ? Object.keys(STRING_KEYS).filter((k) => !own.some((o) => o.member === k) && this.data.strings[STRING_KEYS[k]]).map((member) => ({ member, fromGame: true })) : [];
-    return [...own, ...game];
+    // The names first: what a person changes most.
+    const rank = (m: string) => (m === "rez\\stat_txt.tbl" ? 0 : m === "rez\\unitnames.tbl" ? 1 : 2);
+    return [...own, ...game].sort((a, b) => rank(a.member) - rank(b.member) || Number(a.fromGame) - Number(b.fromGame) || (a.member < b.member ? -1 : 1));
   }
 
   async strings(member: string): Promise<string[] | null> {

@@ -25,8 +25,9 @@ export function columnsOf(table: DatTableName): Column[] {
 /** A stored value as text. */
 export function display(field: DatField, value: number): string {
   const coder = field.text;
-  if (coder?.kind === "hitPoints") return value % 256 ? (value / 256).toFixed(2).replace(/0$/, "") : String(value / 256);
-  if (coder?.kind === "supply") return value % 2 ? (value / 2).toFixed(1) : String(value / 2);
+  // Exact: a value in 1/256ths has at most eight decimals, and reads back to itself.
+  if (coder?.kind === "hitPoints") return String(value / 256);
+  if (coder?.kind === "supply") return String(value / 2);
   if (coder?.kind === "flags") return `0x${value.toString(16).padStart(Math.ceil(coder.bits / 4), "0")}`;
   return String(value);
 }

@@ -76,7 +76,7 @@ export class TablesView {
     this.picker = h("select", { title: t("The table"), onchange: () => this.show(this.picker.value as DatTableName) });
     this.search = h("input", { type: "search", placeholder: t("Search names and ids"), style: "width: 200px", oninput: () => { this.query = this.search.value; this.filter(); } });
     this.unnamedBox = h("input", { type: "checkbox", onchange: () => { this.unnamed = this.unnamedBox.checked; this.filter(); } });
-    this.count = h("span", { className: "mx-dim" });
+    this.count = h("span", { className: "mx-dim mx-count" });
     this.rows = h("div");
     this.sizer = h("div", { style: "position: relative" }, this.rows);
     this.grid = h("div", { className: "mx-grid", tabindex: "0", onscroll: () => this.paint() }, this.sizer);
@@ -201,7 +201,7 @@ export class TablesView {
     for (let i = from; i < to; i++) {
       const id = this.ids[i];
       const used = this.session.refs.usedBy(this.table, id).length;
-      const row = h("div", { className: `mx-row${id === this.selected ? " on" : ""}`, style: `grid-template-columns: ${this.template}`, dataset: { id: String(id) }, onclick: () => { this.selected = id; this.drawn.revision = -1; this.paint(); this.drawSide(); } },
+      const row = h("div", { className: `mx-row${id === this.selected ? " on" : ""}`, style: `grid-template-columns: ${this.template}`, dataset: { id: String(id) }, onclick: () => this.select(id) },
         h("span", { className: "mx-cell num stick mx-mono", style: "left: 0" }, String(id)),
         h("span", { className: "mx-cell stick", style: "left: 56px", title: names[id] }, names[id] || h("span", { className: "mx-faint" }, "—")),
         h("span", { className: "mx-cell num" }, used ? String(used) : ""));
@@ -215,6 +215,14 @@ export class TablesView {
       }
       this.rows.append(row);
     }
+  }
+
+  /** Selects an entry without drawing the rows again (a double-click's first click must leave its cell in place). */
+  private select(id: number) {
+    if (this.selected === id) return;
+    this.selected = id;
+    for (const row of this.rows.querySelectorAll<HTMLElement>(".mx-row[data-id]")) row.classList.toggle("on", row.dataset.id === String(id));
+    this.drawSide();
   }
 
   private value(c: Column, id: number): number {
@@ -337,8 +345,7 @@ export class TablesView {
     if (!uses.length) this.side.append(h("p", { className: "mx-faint" }, t("Nothing points at this entry.")));
     else {
       const list = h("ul", { className: "mx-uses" });
-      for (const u of uses.slice(0, 200)) list.append(h("li", null, u));
-      if (uses.length > 200) list.append(h("li", { className: "mx-faint" }, t("and {n} more", { n: num(uses.length - 200) })));
+      for (const u of uses) list.append(h("li", null, u));
       this.side.append(list);
     }
   }
@@ -380,22 +387,37 @@ export class TablesView {
     return h("span", { className: "mx-faint" }, text);
   }
 
-  /** What points at an entry, as links: the entries of other tables, and for an image the others that draw its GRP. */
+  /**
+   * What points at an entry, as links, a group a field (`units · ground_weapon`): the entries of other tables, and for
+   * an image the others that draw its GRP, for a sound row the others that play its file. A long group shows its first
+   * entries and says how many more.
+   */
   private uses(id: number): HTMLElement[] {
-    const out: HTMLElement[] = [];
-    const link = (r: RefFrom, note?: string) => {
-      const n = this.session.entryName(r.table, r.id);
-      return h("a", { className: "mx-link", onclick: () => this.ctx.go(r.table, r.id, r.field) }, `${r.table} ${r.id}${n ? ` ${n}` : ""}`, h("span", { className: "mx-faint" }, ` · ${note ?? r.field}`));
+    const groups = new Map<string, { refs: RefFrom[]; note?: string }>();
+    const add = (r: RefFrom, note?: string) => {
+      const key = `${r.table} · ${note ?? r.field}`;
+      const g = groups.get(key) ?? { refs: [], note };
+      g.refs.push(r);
+      groups.set(key, g);
     };
-    for (const r of this.session.refs.usedBy(this.table, id)) out.push(link(r));
+    for (const r of this.session.refs.usedBy(this.table, id)) add(r);
     const file = this.session.table(this.table)!;
     if (this.table === "images") {
       const grp = file.columns.grp_file[id];
-      for (const r of this.session.refs.usedBy("images.tbl", grp)) if (!(r.table === "images" && r.id === id) && r.field === "grp_file") out.push(link(r, t("the same picture")));
+      for (const r of this.session.refs.usedBy("images.tbl", grp)) if (!(r.table === "images" && r.id === id) && r.field === "grp_file") add(r, t("the same picture"));
     }
     if (this.table === "sfxdata") {
       const wav = file.columns.sound_file[id];
-      for (const r of this.session.refs.usedBy("sfxdata.tbl", wav)) if (!(r.table === "sfxdata" && r.id === id)) out.push(link(r, t("the same sound file")));
+      for (const r of this.session.refs.usedBy("sfxdata.tbl", wav)) if (!(r.table === "sfxdata" && r.id === id)) add(r, t("the same sound file"));
+    }
+    const out: HTMLElement[] = [];
+    for (const [key, g] of groups) {
+      out.push(h("span", { className: "mx-dim" }, `${key} (${num(g.refs.length)})`));
+      for (const r of g.refs.slice(0, 12)) {
+        const n = this.session.entryName(r.table, r.id);
+        out.push(h("a", { className: "mx-link", style: "margin-left: 10px", onclick: () => this.ctx.go(r.table, r.id, r.field) }, `${r.table} ${r.id}${n ? ` ${n}` : ""}`));
+      }
+      if (g.refs.length > 12) out.push(h("span", { className: "mx-faint", style: "margin-left: 10px" }, t("and {n} more", { n: num(g.refs.length - 12) })));
     }
     return out;
   }

@@ -46,6 +46,7 @@ const STYLE = `
 .mx input, .mx select { color: inherit; background: var(--bg-0, #0a0c10); border: 1px solid var(--border, #2c3341); border-radius: 3px; padding: 1px 5px; min-height: 22px; }
 .mx input:focus, .mx select:focus { outline: none; box-shadow: var(--focus, 0 0 0 1px #4fd1c5); }
 .mx input.bad { box-shadow: 0 0 0 1px var(--danger, #d9534f); }
+.mx label { display: inline-flex; align-items: center; gap: 4px; }
 .mx .mx-dim { color: var(--text-dim, #99a2b3); }
 .mx .mx-faint { color: var(--text-faint, #5d6675); }
 .mx .mx-warn { color: var(--warn, #e0a545); }

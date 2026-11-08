@@ -6191,6 +6191,7 @@ var STYLE = `
 .mx input, .mx select { color: inherit; background: var(--bg-0, #0a0c10); border: 1px solid var(--border, #2c3341); border-radius: 3px; padding: 1px 5px; min-height: 22px; }
 .mx input:focus, .mx select:focus { outline: none; box-shadow: var(--focus, 0 0 0 1px #4fd1c5); }
 .mx input.bad { box-shadow: 0 0 0 1px var(--danger, #d9534f); }
+.mx label { display: inline-flex; align-items: center; gap: 4px; }
 .mx .mx-dim { color: var(--text-dim, #99a2b3); }
 .mx .mx-faint { color: var(--text-faint, #5d6675); }
 .mx .mx-warn { color: var(--warn, #e0a545); }
@@ -10233,7 +10234,8 @@ var ModSession = class _ModSession {
   stringFiles() {
     const own = this.members().filter((k) => k.endsWith(".tbl")).map((member) => ({ member, fromGame: false }));
     const game = this.base ? Object.keys(STRING_KEYS).filter((k) => !own.some((o) => o.member === k) && this.data.strings[STRING_KEYS[k]]).map((member) => ({ member, fromGame: true })) : [];
-    return [...own, ...game];
+    const rank = (m) => m === "rez\\stat_txt.tbl" ? 0 : m === "rez\\unitnames.tbl" ? 1 : 2;
+    return [...own, ...game].sort((a2, b) => rank(a2.member) - rank(b.member) || Number(a2.fromGame) - Number(b.fromGame) || (a2.member < b.member ? -1 : 1));
   }
   async strings(member) {
     const k = gameName(member);
@@ -10864,10 +10866,9 @@ var StringsView = class {
         if (n) uses.append(", ");
         uses.append(u);
       });
-      this.rows.append(h("div", { className: `mx-row${i2 === this.selected ? " on" : ""}`, style: cols, onclick: () => {
+      this.rows.append(h("div", { className: `mx-row${i2 === this.selected ? " on" : ""}`, style: cols, dataset: { i: String(i2) }, onclick: () => {
         this.selected = i2;
-        this.drawn.revision = -1;
-        this.paint();
+        for (const r of this.rows.querySelectorAll(".mx-row[data-i]")) r.classList.toggle("on", r.dataset.i === String(i2));
       } }, h("span", { className: "mx-cell num mx-mono" }, String(i2 + 1)), text, uses));
     }
   }
@@ -10908,8 +10909,8 @@ function columnsOf(table) {
 }
 function display(field, value) {
   const coder = field.text;
-  if (coder?.kind === "hitPoints") return value % 256 ? (value / 256).toFixed(2).replace(/0$/, "") : String(value / 256);
-  if (coder?.kind === "supply") return value % 2 ? (value / 2).toFixed(1) : String(value / 2);
+  if (coder?.kind === "hitPoints") return String(value / 256);
+  if (coder?.kind === "supply") return String(value / 2);
   if (coder?.kind === "flags") return `0x${value.toString(16).padStart(Math.ceil(coder.bits / 4), "0")}`;
   return String(value);
 }
@@ -10992,7 +10993,7 @@ var TablesView = class {
       this.unnamed = this.unnamedBox.checked;
       this.filter();
     } });
-    this.count = h("span", { className: "mx-dim" });
+    this.count = h("span", { className: "mx-dim mx-count" });
     this.rows = h("div");
     this.sizer = h("div", { style: "position: relative" }, this.rows);
     this.grid = h("div", { className: "mx-grid", tabindex: "0", onscroll: () => this.paint() }, this.sizer);
@@ -11128,12 +11129,7 @@ var TablesView = class {
       const used = this.session.refs.usedBy(this.table, id).length;
       const row = h(
         "div",
-        { className: `mx-row${id === this.selected ? " on" : ""}`, style: `grid-template-columns: ${this.template}`, dataset: { id: String(id) }, onclick: () => {
-          this.selected = id;
-          this.drawn.revision = -1;
-          this.paint();
-          this.drawSide();
-        } },
+        { className: `mx-row${id === this.selected ? " on" : ""}`, style: `grid-template-columns: ${this.template}`, dataset: { id: String(id) }, onclick: () => this.select(id) },
         h("span", { className: "mx-cell num stick mx-mono", style: "left: 0" }, String(id)),
         h("span", { className: "mx-cell stick", style: "left: 56px", title: names[id] }, names[id] || h("span", { className: "mx-faint" }, "\u2014")),
         h("span", { className: "mx-cell num" }, used ? String(used) : "")
@@ -11151,6 +11147,13 @@ var TablesView = class {
       }
       this.rows.append(row);
     }
+  }
+  /** Selects an entry without drawing the rows again (a double-click's first click must leave its cell in place). */
+  select(id) {
+    if (this.selected === id) return;
+    this.selected = id;
+    for (const row of this.rows.querySelectorAll(".mx-row[data-id]")) row.classList.toggle("on", row.dataset.id === String(id));
+    this.drawSide();
   }
   value(c3, id) {
     const file = this.session.table(this.table);
@@ -11272,8 +11275,7 @@ var TablesView = class {
     if (!uses.length) this.side.append(h("p", { className: "mx-faint" }, t2("Nothing points at this entry.")));
     else {
       const list = h("ul", { className: "mx-uses" });
-      for (const u of uses.slice(0, 200)) list.append(h("li", null, u));
-      if (uses.length > 200) list.append(h("li", { className: "mx-faint" }, t2("and {n} more", { n: num2(uses.length - 200) })));
+      for (const u of uses) list.append(h("li", null, u));
       this.side.append(list);
     }
   }
@@ -11324,22 +11326,37 @@ var TablesView = class {
     if (ref === "iscript.bin") return h("a", { className: "mx-link", onclick: () => this.ctx.goScript(v) }, `\u2192 iscript ${v}`);
     return h("span", { className: "mx-faint" }, text);
   }
-  /** What points at an entry, as links: the entries of other tables, and for an image the others that draw its GRP. */
+  /**
+   * What points at an entry, as links, a group a field (`units · ground_weapon`): the entries of other tables, and for
+   * an image the others that draw its GRP, for a sound row the others that play its file. A long group shows its first
+   * entries and says how many more.
+   */
   uses(id) {
-    const out = [];
-    const link = (r, note) => {
-      const n = this.session.entryName(r.table, r.id);
-      return h("a", { className: "mx-link", onclick: () => this.ctx.go(r.table, r.id, r.field) }, `${r.table} ${r.id}${n ? ` ${n}` : ""}`, h("span", { className: "mx-faint" }, ` \xB7 ${note ?? r.field}`));
+    const groups = /* @__PURE__ */ new Map();
+    const add = (r, note) => {
+      const key = `${r.table} \xB7 ${note ?? r.field}`;
+      const g = groups.get(key) ?? { refs: [], note };
+      g.refs.push(r);
+      groups.set(key, g);
     };
-    for (const r of this.session.refs.usedBy(this.table, id)) out.push(link(r));
+    for (const r of this.session.refs.usedBy(this.table, id)) add(r);
     const file = this.session.table(this.table);
     if (this.table === "images") {
       const grp = file.columns.grp_file[id];
-      for (const r of this.session.refs.usedBy("images.tbl", grp)) if (!(r.table === "images" && r.id === id) && r.field === "grp_file") out.push(link(r, t2("the same picture")));
+      for (const r of this.session.refs.usedBy("images.tbl", grp)) if (!(r.table === "images" && r.id === id) && r.field === "grp_file") add(r, t2("the same picture"));
     }
     if (this.table === "sfxdata") {
       const wav = file.columns.sound_file[id];
-      for (const r of this.session.refs.usedBy("sfxdata.tbl", wav)) if (!(r.table === "sfxdata" && r.id === id)) out.push(link(r, t2("the same sound file")));
+      for (const r of this.session.refs.usedBy("sfxdata.tbl", wav)) if (!(r.table === "sfxdata" && r.id === id)) add(r, t2("the same sound file"));
+    }
+    const out = [];
+    for (const [key, g] of groups) {
+      out.push(h("span", { className: "mx-dim" }, `${key} (${num2(g.refs.length)})`));
+      for (const r of g.refs.slice(0, 12)) {
+        const n = this.session.entryName(r.table, r.id);
+        out.push(h("a", { className: "mx-link", style: "margin-left: 10px", onclick: () => this.ctx.go(r.table, r.id, r.field) }, `${r.table} ${r.id}${n ? ` ${n}` : ""}`));
+      }
+      if (g.refs.length > 12) out.push(h("span", { className: "mx-faint", style: "margin-left: 10px" }, t2("and {n} more", { n: num2(g.refs.length - 12) })));
     }
     return out;
   }

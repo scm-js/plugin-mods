@@ -117,7 +117,7 @@ export class StringsView {
       text.addEventListener("dblclick", () => this.edit(text, i));
       const uses = h("span", { className: "mx-cell" });
       this.uses(i).forEach((u, n) => { if (n) uses.append(", "); uses.append(u); });
-      this.rows.append(h("div", { className: `mx-row${i === this.selected ? " on" : ""}`, style: cols, onclick: () => { this.selected = i; this.drawn.revision = -1; this.paint(); } }, h("span", { className: "mx-cell num mx-mono" }, String(i + 1)), text, uses));
+      this.rows.append(h("div", { className: `mx-row${i === this.selected ? " on" : ""}`, style: cols, dataset: { i: String(i) }, onclick: () => { this.selected = i; for (const r of this.rows.querySelectorAll<HTMLElement>(".mx-row[data-i]")) r.classList.toggle("on", r.dataset.i === String(i)); } }, h("span", { className: "mx-cell num mx-mono" }, String(i + 1)), text, uses));
     }
   }
 

@@ -146,3 +146,21 @@ describe("saving", () => {
     for (const k of s.members()) expect(equal(await again.read(k), await s.read(k)), k).toBe(true);
   });
 });
+
+describe("a value as typed", () => {
+  it("hit points in whole points and 1/256ths, supply in halves, flags in hex; each reads back to itself", async () => {
+    const { DAT_SCHEMAS } = await import("@scm-js/core");
+    const { display, parse } = await import("../fields");
+    const field = (t: "units", n: string) => DAT_SCHEMAS[t].fields.find((f) => f.name === n)!;
+    const hp = field("units", "hit_points"), supply = field("units", "supply_required"), flags = field("units", "special_ability_flags");
+    for (const v of [0, 1, 40 * 256, 40 * 256 + 128, 0x7fffff]) expect(parse(hp, display(hp, v))).toBe(v);
+    expect(display(hp, 1)).toBe("0.00390625");
+    expect(parse(hp, "45")).toBe(45 * 256);
+    expect(parse(hp, "0.001")).toEqual({ error: "Hit points go in 1/256ths." });
+    expect(display(supply, 3)).toBe("1.5");
+    expect(parse(supply, "1.5")).toBe(3);
+    expect(display(flags, 0x41)).toBe("0x00000041");
+    expect(parse(flags, "0x41")).toBe(0x41);
+    expect(parse(flags, "x")).toEqual({ error: "A whole number is needed (0x… for hex)." });
+  });
+});
