@@ -6,7 +6,7 @@
  */
 import { decodeGrpImage, type GrpImage } from "@scm-js/core";
 import { button, clear, h } from "./dom";
-import { msg, t, translate } from "./i18n";
+import { t } from "./i18n";
 import { num, sizeText } from "./info";
 import type { Look } from "./look";
 import { PALETTES, exportPng, frameRgba, importPng, pictureList, sheetRgba, type ImportPlan, type PictureEntry } from "./pictures";
@@ -15,8 +15,6 @@ import type { ViewContext } from "./tablesView";
 
 type Mode = "frames" | "sheet" | "animation";
 
-/** The first eight `tunit.pcx` rows, as the game's player colours are called; the file has sixteen. */
-const TEAM_NAMES = [msg("Red"), msg("Blue"), msg("Teal"), msg("Purple"), msg("Orange"), msg("Brown"), msg("White"), msg("Yellow")];
 
 export class PicturesView {
   readonly el: HTMLElement;
@@ -50,8 +48,8 @@ export class PicturesView {
     const palette = h("select", { title: t("Palette"), onchange: () => { this.look.palette = palette.value; void this.look.load().then(() => this.draw()); } },
       ...PALETTES.map((p) => h("option", { value: p }, p)));
     palette.value = this.look.palette;
-    const team = h("select", { title: t("Team colour (tunit.pcx)"), onchange: () => { this.look.team = Number(team.value); this.draw(); } },
-      h("option", { value: "-1" }, t("No team colour")), ...Array.from({ length: 16 }, (_, i) => h("option", { value: String(i) }, TEAM_NAMES[i] ? t("Team colour: {name}", { name: translate(TEAM_NAMES[i]) }) : t("Team colour: row {n}", { n: i }))));
+    const team = h("select", { title: t("Team colour"), onchange: () => { this.look.team = Number(team.value); this.draw(); } },
+      h("option", { value: "-1" }, t("No team colour")), ...Array.from({ length: 12 }, (_, i) => h("option", { value: String(i) }, t("Team colour: player {n}", { n: i + 1 }))));
     team.value = String(this.look.team);
     this.modeBar = h("span", { className: "mx-bar", style: "padding: 0" });
     this.info = h("div", { className: "mx-dim", style: "padding: 2px 6px; white-space: normal" });
@@ -161,6 +159,18 @@ export class PicturesView {
     const c2 = canvas.getContext("2d")!;
     c2.imageSmoothingEnabled = false;
     c2.drawImage(off, 0, 0, canvas.width, canvas.height);
+    canvas.dataset.drawnBy = "plugin";
+    // In the open map's own tileset the editor draws the frame itself, as it draws units (the map's player colours
+    // included). Another tileset's palette would have the editor decode that whole tileset, so the plugin draws those.
+    if (this.ctx.api.document.info()?.tileset === this.look.palette) {
+      const frame = this.frame, bytes = this.bytes!;
+      void this.ctx.api.graphics.grpImage(bytes, frame, { palette: this.look.palette, teamColor: this.look.team >= 0 ? this.look.team : null }).then((pic) => {
+        if (!pic || !canvas.isConnected || frame !== this.frame || bytes !== this.bytes) return;
+        c2.clearRect(0, 0, canvas.width, canvas.height);
+        c2.drawImage(pic.image, 0, 0, canvas.width, canvas.height);
+        canvas.dataset.drawnBy = "editor";
+      });
+    }
     const slider = h("input", { type: "range", min: "0", max: String(grp.frames.length - 1), value: String(this.frame), style: "width: 240px", oninput: () => { this.frame = Number(slider.value); this.draw(); } });
     const f = grp.frames[this.frame];
     this.stage.append(

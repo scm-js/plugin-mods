@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { decodeGrpImage, decodeLoFile, decodePng, emptyDat, encodeDat, encodeGrpImage, encodeLoFile, encodePng, encodeTblFile, iscriptFromText, parseWavHeader, type GrpImage } from "@scm-js/core";
 import { exportPng, frameRgba, importPng, paletteRgba, pictureList, teamLut } from "../pictures";
 import { AnimationRunner, ScriptIndex, animationsOf, findScript } from "../animate";
-import { GAME_WAV, convertToWav, decodePcmWav, encodeWav } from "../wav";
+import { decodeWav, encodeWav } from "@scm-js/core";
+import { GAME_WAV, convertToWav } from "../wav";
 import { openPieces } from "../source";
 import { ModSession } from "../session";
 import { bytesPiece, equal } from "./support";
@@ -91,7 +92,7 @@ describe("sounds", () => {
     expect(out.seconds).toBeCloseTo(0.1, 5);
     const info = parseWavHeader(out.bytes)!;
     expect([info.format, info.sampleRate, info.channels, info.bitsPerSample]).toEqual([1, 22050, 1, 16]);
-    const back = decodePcmWav(out.bytes)!;
+    const back = decodeWav(out.bytes)!;
     expect(back.channels[0].length).toBe(2205);
     // Mono is the channels' mean: (0.5 sin − 0.25 sin) / 2, a 441 Hz wave at an eighth of full scale.
     expect(Math.max(...back.channels[0])).toBeCloseTo(0.125, 2);

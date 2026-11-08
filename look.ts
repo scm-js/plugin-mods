@@ -10,7 +10,10 @@ import type { ModSession } from "./session";
 
 export class Look {
   palette = "jungle";
-  /** A `tunit.pcx` row, or -1 for none. */
+  /**
+   * The player whose colour the team slots take, or -1 for none. The editor's own drawing colours a player as the open
+   * map does; the plugin's (sheets, the preview) takes the `tunit.pcx` row of the player's default colour.
+   */
   team = 0;
   private wpe = new Map<string, Uint8Array | null>();
   private tunit: Uint8Array | null | undefined;

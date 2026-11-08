@@ -35,11 +35,8 @@ describe.skipIf(!have)("a large mod's mpq/ folder", () => {
     const bad = await s.setScriptText(doc.id, state.text!.replace("\tplayfram ", "\tplayfrm "));
     expect(bad.error?.message).toBe("\"playfrm\" is not an iscript command");
     expect(await s.edited()).toEqual([]);
-    // The attach reader: the mod's .datex tables, read as .datex.
-    const { reader } = attachReader({ members: () => s.members(), read: (m) => s.read(m), baseManifest: { datex: [], optional: [] } });
-    const manifest = JSON.parse(new TextDecoder().decode((await reader("unit/manifest.json"))!));
-    expect(manifest.datex).toEqual(["flingy", "images", "mapdata", "orders", "portdata", "sprites", "techdata", "units", "upgrades", "weapons"]);
-    expect(manifest.optional).toEqual(["rez/unitnames.tbl", "unit/cmdbtns/uniticons.grp"]);
-    expect(decodeDat("units", (await reader("arr/units.datex"))!, { fileName: "units.datex" }).count).toBe(3000);
+    // The attach reader: the mod's .datex table by its member.
+    const reader = attachReader({ has: (m) => s.has(m), read: (m) => s.read(m) });
+    expect(decodeDat("units", (await reader("arr/units.datex", { member: "arr\\units.datex", under: async () => null }))!, { fileName: "units.datex" }).count).toBe(3000);
   });
 });

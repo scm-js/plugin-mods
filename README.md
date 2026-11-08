@@ -88,16 +88,21 @@ network, serve TrigScript's `dist/` and set the plugin's storage key `monacoDist
 
 ## Before publishing
 
-The codecs and the mod folder form come from `@scm-js/core`, which has them on scm-js's `mods` branch and not yet in
-a published version. Until then `package.json` takes it as `file:../scm-js-mods/core` (a checkout of that branch
-beside this one), and `build.mjs`, `tsconfig.json` (`paths`, plus `core-env.d.ts` for the Vite-only `import.meta`
-of a few of the editor's modules) and `vitest.config.ts` read its sources. When the version with the mod formats is
-published:
+Two things this plugin uses are on scm-js's `mods` branch and not yet published:
 
-1. `npm install @scm-js/core@<that version>` (replacing the `file:` dependency).
-2. Delete the `alias` in `build.mjs` (it is skipped already once `node_modules/@scm-js/core/dist/` exists), the
-   `paths` entry in `tsconfig.json`, `core-env.d.ts`, and the alias in `vitest.config.ts`.
-3. When `@scm-js/plugin-api` declares `gameData.attach` and `gameData.reload`, drop the `AttachApi` cast in `plugin.ts`.
+- **`@scm-js/core` with the mod formats** (and the WAV codec). `package.json` takes it as `file:../scm-js-mods/core`
+  (a checkout of that branch beside this one), and `build.mjs`, `tsconfig.json` (`paths`, plus `core-env.d.ts` for
+  the Vite-only `import.meta` of a few of the editor's modules) and `vitest.config.ts` read its sources. When it is
+  published: `npm install @scm-js/core@<that version>`, then delete the `alias` in `build.mjs` (skipped already once
+  `node_modules/@scm-js/core/dist/` exists), the `@scm-js/core` entry in `tsconfig.json`'s `paths`, `core-env.d.ts`,
+  and the alias in `vitest.config.ts`.
+- **The plugin API's additions for data sets** — a reader told the member and able to read beneath it,
+  `gameData.rehash` and `storedPath`, `ui.pickFiles({ directory: true })`, folders for `ui.fileType`,
+  `graphics.grpImage`. They arrive in the next `@scm-js/plugin-api` release after 1.67.0, so **1.68.0 is the minimum**.
+  Until then `types/plugin-api/index.d.ts` is that release's declarations, generated from the branch
+  (`node scripts/build-plugin-types.mjs --out …` in scm-js), and `tsconfig.json`'s `paths` points the package at it.
+  When it is published: `npm install -D @scm-js/plugin-api@^1.68.0`, delete `types/`, and the `@scm-js/plugin-api`
+  entry in `paths`. An editor older than these additions opens mods and edits them, but cannot draw from them.
 
 ## License
 

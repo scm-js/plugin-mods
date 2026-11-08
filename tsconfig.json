@@ -23,6 +23,9 @@
     "paths": {
       "@scm-js/core": [
         "./node_modules/@scm-js/core/src/index.ts"
+      ],
+      "@scm-js/plugin-api": [
+        "./types/plugin-api/index.d.ts"
       ]
     }
   },

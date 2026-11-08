@@ -12,7 +12,7 @@
  *
  * The codecs and the folder form are `@scm-js/core`'s, the same code the editor and the command line run.
  */
-import type { GameDataProfile, GameDataSource, PanelHandle, PluginApi } from "@scm-js/plugin-api";
+import type { FolderFile, GameDataProfile, PanelHandle, PluginApi } from "@scm-js/plugin-api";
 import { DAT_SCHEMAS, createScenario, serializeScenario, type DatTableName, type ModChange, type ModFinding } from "@scm-js/core";
 import { button, clear, ensureStyle, h } from "./dom";
 import { bindLanguage, msg, t } from "./i18n";
@@ -20,24 +20,18 @@ import { foundLine, num, sizeText } from "./info";
 import { KO } from "./ko";
 import { DEFAULT_DIST, DIST_STORAGE_KEY } from "./monaco";
 import { PlayTab, playAddress, playMessage, playPageThere } from "./play";
-import { attachReader, storedPathOf, type UnitManifest } from "./reader";
+import { attachReader } from "./reader";
 import { changedZip, currentMembers, textFolder, writeMpq, writeZip } from "./save";
 import { Look } from "./look";
 import { PicturesView } from "./picturesView";
 import { ScriptsView } from "./scriptsView";
 import { SoundsView } from "./soundsView";
 import { ModSession } from "./session";
-import { OpenError, openPieces, type Piece } from "./source";
+import { OpenError, looksLikeMod, openPieces, type Piece } from "./source";
 import { StringsView } from "./stringsView";
 import { GraftsView } from "./graftsView";
 import { LIVE_SERVICE, LiveSender, livePath, type LiveService } from "./live";
 import { TablesView, type ViewContext } from "./tablesView";
-
-/** `api.gameData.attach` / `reload`, which `@scm-js/plugin-api` 1.67 does not declare yet (the editor has them since its data sets took a reader). */
-interface AttachApi {
-  attach(profile: GameDataProfile, read: (path: string) => Promise<Uint8Array | null>, options?: { hash?: string }): Promise<GameDataSource & { hash?: string }>;
-  reload(): void;
-}
 
 export default function activate(api: PluginApi) {
   api.i18n.register({ ko: KO });
@@ -45,7 +39,13 @@ export default function activate(api: PluginApi) {
   const editor = new ModEditor(api);
   api.commands.register({ id: "open", title: msg("Open a Mod…"), run: (...args: unknown[]) => editor.openCommand(args[0]) });
   api.menu.add("File", { label: msg("Open a Mod…"), after: "Open Recent", command: "open" });
-  api.ui.fileType({ name: t("StarCraft mod"), extensions: [".mpq", ".exe", ".zip"], open: (files) => editor.openFiles(files.map((f) => ({ path: f.name, size: f.size, read: async () => new Uint8Array(await f.arrayBuffer()) })), files[0]?.name ?? "mod") });
+  api.ui.fileType({
+    name: t("StarCraft mod"), extensions: [".mpq", ".exe", ".zip"],
+    open: (files) => editor.openFiles(files.map(filePiece), files[0]?.name ?? "mod"),
+    // A folder dropped anywhere on the editor: a mod when it holds the game's folders at its root or one down.
+    acceptsFolder: (paths) => looksLikeMod(paths),
+    openFolder: (files) => editor.openFiles(files.map(folderPiece), files[0]?.path.split("/")[0] ?? "mod"),
+  });
   api.events.on("language", () => editor.relabel());
   api.events.on("gameData", () => editor.sourceChanged());
   // Live (part d): plugin-scm-sim's `scm-sim.live`, when it is installed, carries edits into a running test game.
@@ -55,6 +55,7 @@ export default function activate(api: PluginApi) {
 
 /** What the copy of the game the editor draws from keeps, by its paths: the rest it cannot say anything about. */
 const COPY_HOLDS = /^(arr\/[^/]+$|scripts\/iscript\.bin$|unit\/|tileset\/|game\/|rez\/unitnames\.tbl$)/;
+
 /** The game's files the plugin keeps once read: small, and read again by every diff, check and string table. */
 const SMALL = /^(arr\/[^/]+$|scripts\/iscript\.bin$|tileset\/stat_txt\.tbl$|rez\/unitnames\.tbl$|unit\/manifest\.json$)/;
 
@@ -85,11 +86,11 @@ class ModEditor {
   private attached: { profile: GameDataProfile; hash: string | null; label: string } | null = null;
   private before: string | null = null;
   private reader: ReturnType<typeof attachReader> | null = null;
-  /** Paths the plugin is reading from the copy underneath at this moment: the reader answers nothing for them. */
-  private readonly quiet = new Map<string, number>();
+
   /** The game's small files (tables, string tables, iscript, the unit manifest) as read before the mod was laid over them. */
   private readonly baseCache = new Map<string, Uint8Array | null>();
-  private baseManifest: (UnitManifest & { grps?: string[]; overlays?: string[] }) | null = null;
+  /** The copy's unit list, for which GRPs and overlays it has without reading each. */
+  private baseManifest: { grps?: string[]; overlays?: string[] } | null = null;
   private update = { timer: 0, running: false, again: false };
   private playTab: PlayTab | null = null;
   private playThere: Promise<boolean> | null = null;
@@ -106,9 +107,10 @@ class ModEditor {
     if (this.session) this.draw();
   }
 
-  private get gameData(): AttachApi | null {
-    const g = this.api.gameData as unknown as Partial<AttachApi>;
-    return typeof g.attach === "function" && typeof g.reload === "function" ? (g as AttachApi) : null;
+  /** The game data API when the editor can draw from a set in memory (an editor from before it cannot). */
+  private get gameData(): PluginApi["gameData"] | null {
+    const g = this.api.gameData;
+    return typeof g.attach === "function" && typeof g.rehash === "function" ? g : null;
   }
 
   /* ── The panel ── */
@@ -201,20 +203,12 @@ class ModEditor {
   }
 
   private openScreen(): HTMLElement {
-    const folder = h("input", { type: "file", multiple: true, style: "display: none" }) as HTMLInputElement;
-    folder.setAttribute("webkitdirectory", "");
-    folder.addEventListener("change", () => {
-      const files = [...(folder.files ?? [])];
-      if (files.length) void this.openFiles(files.map(filePiece), (files[0].webkitRelativePath || files[0].name).split("/")[0]);
-      folder.value = "";
-    });
     const zone = h("div", { className: "mx-empty", dataset: { drop: "mods" } },
       h("div", null, t("Drop a mod here: its folder, an .mpq, a mod's .exe or a .zip.")),
       h("div", { className: "mx-dim" }, t("Nothing of an .exe is run; its archive is read.")),
       h("div", { className: "mx-bar", style: "justify-content: center" },
-        button(t("Choose a Folder…"), () => folder.click(), { primary: true }),
-        button(t("Choose a File…"), () => void this.pickFile())),
-      folder);
+        button(t("Choose a Folder…"), () => void this.pickFolder(), { primary: true }),
+        button(t("Choose a File…"), () => void this.pickFile())));
     zone.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); zone.classList.add("over"); });
     zone.addEventListener("dragleave", () => zone.classList.remove("over"));
     zone.addEventListener("drop", (e) => {
@@ -222,6 +216,11 @@ class ModEditor {
       void droppedPieces(e.dataTransfer).then((d) => { if (d.pieces.length) void this.openFiles(d.pieces, d.name); });
     });
     return zone;
+  }
+
+  private async pickFolder() {
+    const files = await this.api.ui.pickFiles({ directory: true });
+    if (files.length) await this.openFiles(files.map(folderPiece), files[0].path.split("/")[0]);
   }
 
   private async pickFile() {
@@ -285,9 +284,7 @@ class ModEditor {
       this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1000).toFixed(1), found: this.found });
       this.api.ui.status(this.found);
       this.draw();
-      // Which files differ from the game's is read now, before the editor draws from the mod (see baseRead).
-      if (base) { this.say(t("Comparing the mod's files with the game's…")); await session.changedMembers(); this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1000).toFixed(1), found: this.found }); }
-      await this.attach(true);
+      await this.attach();
     } catch (e) {
       this.session = null;
       this.say(e instanceof OpenError ? e.message : t("The mod could not be opened: {error}", { error: e instanceof Error ? e.message : String(e) }));
@@ -322,29 +319,27 @@ class ModEditor {
 
   /* ── The game's own files, read past the mod ── */
 
+  /**
+   * A file of the game beneath the mod, by member: `gameData.read(…, { under: true })` reads the set the mod is laid
+   * over without asking the mod's reader. Only paths the editor's copy keeps are asked; the small files are kept.
+   */
   private async baseRead(member: string): Promise<Uint8Array | null> {
-    const stored = storedPathOf(member);
+    const stored = this.api.gameData.storedPath(member);
     if (!COPY_HOLDS.test(stored)) return null;
     if (this.baseCache.has(stored)) return this.baseCache.get(stored)!;
-    // While the mod is attached every read goes through it first: it says nothing for this path for a moment, so the copy
-    // answers. An editor read of the same path in that moment would get the copy's file too, so the plugin reads the
-    // game's files it compares before it attaches (and keeps the small ones here).
-    this.quiet.set(stored, (this.quiet.get(stored) ?? 0) + 1);
-    try {
-      const bytes = await this.api.gameData.read(stored);
-      if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
-      return bytes;
-    } finally { const n = this.quiet.get(stored)! - 1; if (n) this.quiet.set(stored, n); else this.quiet.delete(stored); }
+    const bytes = await this.api.gameData.read(stored, { under: true });
+    if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
+    return bytes;
   }
 
   private async readBaseManifest() {
-    const bytes = await this.baseRead("unit\\manifest.json");
+    const bytes = await this.api.gameData.read("unit/manifest.json", { under: true });
     try { this.baseManifest = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : null; } catch { this.baseManifest = null; }
   }
 
   /** Whether the copy has a member, from its unit manifest where that lists it (no fetch), else by reading it. */
   private async baseHas(member: string): Promise<boolean | null> {
-    const stored = storedPathOf(member);
+    const stored = this.api.gameData.storedPath(member);
     if (!COPY_HOLDS.test(stored)) return null;
     const m = this.baseManifest;
     const under = stored.startsWith("unit/") && !stored.startsWith("unit/cmdbtns/") ? stored.slice(5).replace(/\//g, "\\") : null;
@@ -362,38 +357,35 @@ class ModEditor {
   }
 
   private isOurs(): boolean {
-    const s = this.api.gameData.source() as { kind: string; profile: GameDataProfile } | null;
+    const s = this.api.gameData.source();
     return !!s && s.kind === "reader" && !!this.attached && s.profile.id === this.attached.profile.id;
   }
 
   /**
-   * Hands the editor a reader over the mod's current files. The hash (over the files that differ from the game's)
-   * is what a map saved now records; it is worked out once the editor already draws from the mod when the mod is
-   * large, and the reader is handed over again with it.
+   * Hands the editor a reader over the mod's current files. The hash (over the files that differ from the game's) is
+   * what a map saved now records: a small mod's goes with the reader, a large one's follows by `rehash` once worked out,
+   * the editor drawing from the mod meanwhile.
    */
-  private async attach(first: boolean) {
+  private async attach() {
     const gd = this.gameData;
     const session = this.session;
     if (!gd || !session) { this.status(); return; }
-    if (first) {
-      const now = this.api.gameData.source() as { kind: string; profile: GameDataProfile } | null;
-      this.before = now && now.kind !== "reader" ? now.profile.id : this.before;
-      this.reader = attachReader({ members: () => session.members(), read: (m) => session.read(m), baseManifest: this.baseManifest }, (path) => this.quiet.has(path));
-    }
+    const now = this.api.gameData.source();
+    this.before = now && now.kind !== "reader" ? now.profile.id : this.before;
+    this.reader = attachReader({ has: (m) => session.has(m), read: (m) => session.read(m) });
     const profile = this.profile();
     const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
-    let hash: string | null = null;
-    if (!first || bytes < 64 * 1024 * 1024) hash = await session.hash();
+    const hash = bytes < 64 * 1024 * 1024 ? await session.hash() : null;
     if (this.session !== session) return;
-    const source = await gd.attach(profile, this.reader!.reader, hash ? { hash } : undefined);
+    const source = await gd.attach(profile, this.reader, hash ? { hash } : undefined);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
     this.status();
     if (!hash) {
       this.say(t("Working out the mod's hash over {size}…", { size: sizeText(bytes) }));
       const later = await session.hash();
-      if (this.session !== session) return;
-      const again = await gd.attach(profile, this.reader!.reader, { hash: later });
-      this.attached = { profile, hash: later, label: this.attachedLabel(again.label, later) };
+      if (this.session !== session || !this.isOurs()) return;
+      const again = gd.rehash(later);
+      this.attached = { profile, hash: later, label: this.attachedLabel(again?.label ?? source.label, later) };
       this.say(t("The mod's hash is {hash}.", { hash: later }));
     }
   }
@@ -428,15 +420,19 @@ class ModEditor {
     if (!gd || !session || !this.reader) return;
     this.update.running = true;
     try {
-      this.reader.invalidate();
-      const hash = await session.hash();
-      if (this.session !== session) return;
-      // A new hash is handed over with the reader (which also reads everything again); the same one needs a reload only.
-      if (!this.attached || !this.isOurs() || hash !== this.attached.hash) {
-        const profile = this.profile();
-        const source = await gd.attach(profile, this.reader.reader, { hash });
-        this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
-      } else gd.reload();
+      if (!this.attached || !this.isOurs()) {
+        // Another data set was chosen meanwhile: draw from the mod again.
+        await this.attach();
+      } else {
+        // Draw from the edit at once, and name it when its digest is ready (only the edited member is read again).
+        gd.reload();
+        const hash = await session.hash();
+        if (this.session !== session) return;
+        if (hash !== this.attached.hash) {
+          const source = gd.rehash(hash);
+          this.attached = { profile: this.attached.profile, hash, label: this.attachedLabel(source?.label ?? "", hash) };
+        }
+      }
       const edited = await session.edited();
       this.said = edited.length ? t("{n, plural, one {{count} file edited} other {{count} files edited}}: {files}.", { n: edited.length, count: num(edited.length), files: edited.slice(0, 4).map((k) => session.nameOf(k)).join(", ") + (edited.length > 4 ? " …" : "") }) : t("No file differs from the mod as it was opened.");
       this.status();
@@ -627,6 +623,11 @@ class ModEditor {
       }
     });
   }
+}
+
+/** A file of a picked or dropped folder (`ui.pickFiles({ directory: true })`, `fileType.openFolder`) as a piece. */
+function folderPiece(f: FolderFile): Piece {
+  return { path: f.path, size: f.file.size, read: async () => new Uint8Array(await f.file.arrayBuffer()) };
 }
 
 /** A picked or dropped `File` as a piece, under its folder path when the picker gave one. */

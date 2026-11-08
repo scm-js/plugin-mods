@@ -3037,6 +3037,47 @@ var WAV_FORMAT = {
   imaAdpcm: 17,
   extensible: 65534
 };
+function isPlainPcm(info) {
+  return info.format === WAV_FORMAT.pcm && (info.bitsPerSample === 8 || info.bitsPerSample === 16) && info.channels >= 1;
+}
+function canDecodeWav(info) {
+  switch (info.format) {
+    case WAV_FORMAT.pcm:
+      return [8, 16, 24, 32].includes(info.bitsPerSample) && info.channels >= 1;
+    case WAV_FORMAT.float:
+      return (info.bitsPerSample === 32 || info.bitsPerSample === 64) && info.channels >= 1;
+    case WAV_FORMAT.alaw:
+    case WAV_FORMAT.mulaw:
+      return info.bitsPerSample === 8 && info.channels >= 1;
+    case WAV_FORMAT.imaAdpcm:
+      return info.bitsPerSample === 4 && info.channels >= 1 && info.blockAlign > 4 * info.channels;
+    case WAV_FORMAT.msAdpcm:
+      return info.bitsPerSample === 4 && info.channels >= 1 && info.blockAlign > 7 * info.channels;
+    default:
+      return false;
+  }
+}
+function wavFrames(info) {
+  if (info.format === WAV_FORMAT.imaAdpcm || info.format === WAV_FORMAT.msAdpcm) {
+    if (info.blockAlign <= 0) return 0;
+    const blocks = Math.floor(info.dataLength / info.blockAlign);
+    const tail = info.dataLength - blocks * info.blockAlign;
+    const perBlock = adpcmSamplesPerBlock(info);
+    const tailSamples = tail > 0 ? Math.max(0, adpcmSamplesPerBlock({ ...info, blockAlign: tail })) : 0;
+    return blocks * perBlock + tailSamples;
+  }
+  const frame = info.channels * Math.ceil(info.bitsPerSample / 8);
+  return frame > 0 ? Math.floor(info.dataLength / frame) : 0;
+}
+function adpcmSamplesPerBlock(info) {
+  const declared = info.extra.length >= 4 ? info.extra[2] | info.extra[3] << 8 : 0;
+  if (info.format === WAV_FORMAT.imaAdpcm) {
+    const implied2 = Math.floor((info.blockAlign - 4 * info.channels) * 8 / (4 * info.channels)) + 1;
+    return declared > 0 ? Math.min(declared, implied2) : implied2;
+  }
+  const implied = Math.floor((info.blockAlign - 7 * info.channels) * 2 / info.channels) + 2;
+  return declared > 0 ? Math.min(declared, implied) : implied;
+}
 function parseWavHeader(bytes) {
   if (bytes.length < 12 || tag(bytes, 0) !== "RIFF" || tag(bytes, 8) !== "WAVE") return null;
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -3067,6 +3108,338 @@ function parseWavHeader(bytes) {
 }
 function tag(bytes, at) {
   return String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
+}
+function encodeWav(channels, sampleRate, bits2) {
+  if (channels.length === 0) throw new Error("encodeWav: no channels");
+  const frames = channels[0].length;
+  const bytesPerSample = bits2 / 8;
+  const blockAlign = channels.length * bytesPerSample;
+  const dataLength = frames * blockAlign;
+  const out = new Uint8Array(44 + dataLength);
+  const dv = new DataView(out.buffer);
+  const ascii = (at2, s) => {
+    for (let i2 = 0; i2 < 4; i2++) out[at2 + i2] = s.charCodeAt(i2);
+  };
+  ascii(0, "RIFF");
+  dv.setUint32(4, 36 + dataLength, true);
+  ascii(8, "WAVE");
+  ascii(12, "fmt ");
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, WAV_FORMAT.pcm, true);
+  dv.setUint16(22, channels.length, true);
+  dv.setUint32(24, sampleRate, true);
+  dv.setUint32(28, sampleRate * blockAlign, true);
+  dv.setUint16(32, blockAlign, true);
+  dv.setUint16(34, bits2, true);
+  ascii(36, "data");
+  dv.setUint32(40, dataLength, true);
+  let at = 44;
+  for (let i2 = 0; i2 < frames; i2++) {
+    for (const ch3 of channels) {
+      const v = Math.max(-1, Math.min(1, ch3[i2] ?? 0));
+      if (bits2 === 16) {
+        dv.setInt16(at, Math.round(v < 0 ? v * 32768 : v * 32767), true);
+        at += 2;
+      } else {
+        out[at++] = Math.round((v + 1) * 127.5);
+      }
+    }
+  }
+  return out;
+}
+function decodeWav(bytes) {
+  const info = parseWavHeader(bytes);
+  if (!info || !canDecodeWav(info)) return null;
+  switch (info.format) {
+    case WAV_FORMAT.pcm:
+      return decodePcm(bytes, info);
+    case WAV_FORMAT.float:
+      return decodeFloat(bytes, info);
+    case WAV_FORMAT.alaw:
+      return decodeCompanded(bytes, info, alawSample);
+    case WAV_FORMAT.mulaw:
+      return decodeCompanded(bytes, info, mulawSample);
+    case WAV_FORMAT.imaAdpcm:
+      return decodeImaAdpcm(bytes, info);
+    case WAV_FORMAT.msAdpcm:
+      return decodeMsAdpcm(bytes, info);
+    default:
+      return null;
+  }
+}
+function decodePcm(bytes, info) {
+  const bytesPerSample = info.bitsPerSample / 8;
+  const frames = Math.floor(info.dataLength / (info.channels * bytesPerSample));
+  const channels = Array.from({ length: info.channels }, () => new Float32Array(frames));
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let at = info.dataOffset;
+  for (let i2 = 0; i2 < frames; i2++) {
+    for (let c3 = 0; c3 < info.channels; c3++) {
+      switch (info.bitsPerSample) {
+        case 8:
+          channels[c3][i2] = bytes[at] / 127.5 - 1;
+          break;
+        case 16: {
+          const s = dv.getInt16(at, true);
+          channels[c3][i2] = s < 0 ? s / 32768 : s / 32767;
+          break;
+        }
+        case 24: {
+          const s = (bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16) << 8 >> 8;
+          channels[c3][i2] = s < 0 ? s / 8388608 : s / 8388607;
+          break;
+        }
+        default: {
+          const s = dv.getInt32(at, true);
+          channels[c3][i2] = s < 0 ? s / 2147483648 : s / 2147483647;
+          break;
+        }
+      }
+      at += bytesPerSample;
+    }
+  }
+  return { sampleRate: info.sampleRate, channels };
+}
+function decodeFloat(bytes, info) {
+  const bytesPerSample = info.bitsPerSample / 8;
+  const frames = Math.floor(info.dataLength / (info.channels * bytesPerSample));
+  const channels = Array.from({ length: info.channels }, () => new Float32Array(frames));
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let at = info.dataOffset;
+  for (let i2 = 0; i2 < frames; i2++) {
+    for (let c3 = 0; c3 < info.channels; c3++) {
+      const v = bytesPerSample === 4 ? dv.getFloat32(at, true) : dv.getFloat64(at, true);
+      channels[c3][i2] = Math.max(-1, Math.min(1, v));
+      at += bytesPerSample;
+    }
+  }
+  return { sampleRate: info.sampleRate, channels };
+}
+function decodeCompanded(bytes, info, sample) {
+  const frames = Math.floor(info.dataLength / info.channels);
+  const channels = Array.from({ length: info.channels }, () => new Float32Array(frames));
+  let at = info.dataOffset;
+  for (let i2 = 0; i2 < frames; i2++) for (let c3 = 0; c3 < info.channels; c3++) channels[c3][i2] = sample(bytes[at++]) / 32768;
+  return { sampleRate: info.sampleRate, channels };
+}
+function mulawSample(b) {
+  const u = ~b & 255;
+  const sign = u & 128;
+  const exponent = u >> 4 & 7;
+  const mantissa = u & 15;
+  let sample = (mantissa << 3) + 132 << exponent;
+  sample -= 132;
+  return sign ? -sample : sample;
+}
+function alawSample(b) {
+  const a2 = b ^ 85;
+  const sign = a2 & 128;
+  const exponent = a2 >> 4 & 7;
+  const mantissa = a2 & 15;
+  const sample = exponent === 0 ? (mantissa << 4) + 8 : (mantissa << 4) + 264 << exponent - 1;
+  return sign ? sample : -sample;
+}
+var IMA_INDEX_TABLE = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
+var IMA_STEP_TABLE = [
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  16,
+  17,
+  19,
+  21,
+  23,
+  25,
+  28,
+  31,
+  34,
+  37,
+  41,
+  45,
+  50,
+  55,
+  60,
+  66,
+  73,
+  80,
+  88,
+  97,
+  107,
+  118,
+  130,
+  143,
+  157,
+  173,
+  190,
+  209,
+  230,
+  253,
+  279,
+  307,
+  337,
+  371,
+  408,
+  449,
+  494,
+  544,
+  598,
+  658,
+  724,
+  796,
+  876,
+  963,
+  1060,
+  1166,
+  1282,
+  1411,
+  1552,
+  1707,
+  1878,
+  2066,
+  2272,
+  2499,
+  2749,
+  3024,
+  3327,
+  3660,
+  4026,
+  4428,
+  4871,
+  5358,
+  5894,
+  6484,
+  7132,
+  7845,
+  8630,
+  9493,
+  10442,
+  11487,
+  12635,
+  13899,
+  15289,
+  16818,
+  18500,
+  20350,
+  22385,
+  24623,
+  27086,
+  29794,
+  32767
+];
+function decodeImaAdpcm(bytes, info) {
+  const ch3 = info.channels;
+  const perBlock = adpcmSamplesPerBlock(info);
+  const frames = wavFrames(info);
+  const channels = Array.from({ length: ch3 }, () => new Float32Array(frames));
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const predictor = new Int32Array(ch3), index = new Int32Array(ch3);
+  let frame = 0;
+  const end = info.dataOffset + info.dataLength;
+  for (let block = info.dataOffset; block + 4 * ch3 <= end && frame < frames; block += info.blockAlign) {
+    const blockEnd = Math.min(block + info.blockAlign, end);
+    let at = block;
+    for (let c3 = 0; c3 < ch3; c3++) {
+      predictor[c3] = dv.getInt16(at, true);
+      index[c3] = Math.max(0, Math.min(88, bytes[at + 2]));
+      channels[c3][frame] = predictor[c3] / 32768;
+      at += 4;
+    }
+    let n = frame + 1;
+    const blockLast = Math.min(frames, frame + perBlock);
+    while (n < blockLast && at + 4 * ch3 <= blockEnd) {
+      for (let c3 = 0; c3 < ch3; c3++) {
+        for (let k = 0; k < 8 && n + (k >> 0) < blockLast; k++) {
+          const nibble = k % 2 === 0 ? bytes[at + (k >> 1)] & 15 : bytes[at + (k >> 1)] >> 4;
+          const step = IMA_STEP_TABLE[index[c3]];
+          let diff = step >> 3;
+          if (nibble & 1) diff += step >> 2;
+          if (nibble & 2) diff += step >> 1;
+          if (nibble & 4) diff += step;
+          if (nibble & 8) diff = -diff;
+          predictor[c3] = Math.max(-32768, Math.min(32767, predictor[c3] + diff));
+          index[c3] = Math.max(0, Math.min(88, index[c3] + IMA_INDEX_TABLE[nibble]));
+          if (n + k < frames) channels[c3][n + k] = predictor[c3] / 32768;
+        }
+        at += 4;
+      }
+      n += 8;
+    }
+    frame = blockLast;
+  }
+  return { sampleRate: info.sampleRate, channels };
+}
+var MS_ADAPTATION = [230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230];
+var MS_COEFS = [[256, 0], [512, -256], [0, 0], [192, 64], [240, 0], [460, -208], [392, -232]];
+function decodeMsAdpcm(bytes, info) {
+  const ch3 = info.channels;
+  const perBlock = adpcmSamplesPerBlock(info);
+  const frames = wavFrames(info);
+  const channels = Array.from({ length: ch3 }, () => new Float32Array(frames));
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const coefs = [];
+  const ex = info.extra;
+  const count = ex.length >= 6 ? ex[4] | ex[5] << 8 : 0;
+  for (let i2 = 0; i2 < count && 6 + i2 * 4 + 3 < ex.length; i2++) {
+    const c12 = (ex[6 + i2 * 4] | ex[7 + i2 * 4] << 8) << 16 >> 16, c23 = (ex[8 + i2 * 4] | ex[9 + i2 * 4] << 8) << 16 >> 16;
+    coefs.push([c12, c23]);
+  }
+  const table = coefs.length > 0 ? coefs : MS_COEFS;
+  const end = info.dataOffset + info.dataLength;
+  let frame = 0;
+  const c1 = new Int32Array(ch3), c22 = new Int32Array(ch3), delta = new Int32Array(ch3), s1 = new Int32Array(ch3), s2 = new Int32Array(ch3);
+  for (let block = info.dataOffset; block + 7 * ch3 <= end && frame < frames; block += info.blockAlign) {
+    const blockEnd = Math.min(block + info.blockAlign, end);
+    let at = block;
+    for (let c4 = 0; c4 < ch3; c4++) {
+      const [a2, b] = table[Math.min(bytes[at++], table.length - 1)];
+      c1[c4] = a2;
+      c22[c4] = b;
+    }
+    for (let c4 = 0; c4 < ch3; c4++) {
+      delta[c4] = dv.getInt16(at, true);
+      at += 2;
+    }
+    for (let c4 = 0; c4 < ch3; c4++) {
+      s1[c4] = dv.getInt16(at, true);
+      at += 2;
+    }
+    for (let c4 = 0; c4 < ch3; c4++) {
+      s2[c4] = dv.getInt16(at, true);
+      at += 2;
+    }
+    const blockLast = Math.min(frames, frame + perBlock);
+    for (let c4 = 0; c4 < ch3; c4++) {
+      if (frame < frames) channels[c4][frame] = s2[c4] / 32768;
+      if (frame + 1 < frames) channels[c4][frame + 1] = s1[c4] / 32768;
+    }
+    let n = frame + 2;
+    let high = true;
+    let c3 = 0;
+    while (n < blockLast && at < blockEnd) {
+      const nibble = high ? bytes[at] >> 4 : bytes[at] & 15;
+      if (!high) at++;
+      high = !high;
+      const signed = nibble >= 8 ? nibble - 16 : nibble;
+      let predicted = (s1[c3] * c1[c3] + s2[c3] * c22[c3] >> 8) + signed * delta[c3];
+      predicted = Math.max(-32768, Math.min(32767, predicted));
+      s2[c3] = s1[c3];
+      s1[c3] = predicted;
+      delta[c3] = Math.max(16, MS_ADAPTATION[nibble] * delta[c3] >> 8);
+      channels[c3][n] = predicted / 32768;
+      c3++;
+      if (c3 === ch3) {
+        c3 = 0;
+        n++;
+      }
+    }
+    frame = blockLast;
+  }
+  return { sampleRate: info.sampleRate, channels };
 }
 
 // ../scm-js-mods/src/data/isomTables.ts
@@ -7373,8 +7746,6 @@ var KO = {
   "Animation": "\uC560\uB2C8\uBA54\uC774\uC158",
   "Another data set was chosen, so the editor no longer draws from {name}. Edit anything to draw from it again.": "\uB2E4\uB978 \uB370\uC774\uD130 \uC138\uD2B8\uAC00 \uC120\uD0DD\uB418\uC5B4 \uD3B8\uC9D1\uAE30\uAC00 \uB354 \uC774\uC0C1 {name}\uC758 \uD30C\uC77C\uB85C \uADF8\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uBB34\uC5C7\uC774\uB4E0 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uADF8 \uD30C\uC77C\uB85C \uADF8\uB9BD\uB2C8\uB2E4.",
   "Assembling\u2026": "\uC5B4\uC148\uBE14\uD558\uB294 \uC911\u2026",
-  "Blue": "\uD30C\uB791",
-  "Brown": "\uAC08\uC0C9",
   "Campaign maps": "\uCEA0\uD398\uC778 \uB9F5",
   "Cancel": "\uCDE8\uC18C",
   "Check {name}": "{name} \uAC80\uC0AC",
@@ -7393,7 +7764,6 @@ var KO = {
   "Close": "\uB2EB\uAE30",
   "Close this mod and open another": "\uC774 \uBAA8\uB4DC\uB97C \uB2EB\uACE0 \uB2E4\uB978 \uBAA8\uB4DC \uC5F4\uAE30",
   "Close {name} and open another mod? Changes not saved are lost.": "{name|\uC744} \uB2EB\uACE0 \uB2E4\uB978 \uBAA8\uB4DC\uB97C \uC5F4\uAE4C\uC694? \uC800\uC7A5\uD558\uC9C0 \uC54A\uC740 \uBCC0\uACBD\uC740 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4.",
-  "Comparing the mod's files with the game's\u2026": "\uBAA8\uB4DC\uC758 \uD30C\uC77C\uC744 \uAC8C\uC784\uC758 \uD30C\uC77C\uACFC \uBE44\uAD50\uD558\uB294 \uC911\u2026",
   "Copied": "\uBCF5\uC0AC\uD588\uC2B5\uB2C8\uB2E4",
   "Copy": "\uBCF5\uC0AC",
   "Diff\u2026": "\uBCC0\uACBD \uB0B4\uC5ED\u2026",
@@ -7453,7 +7823,6 @@ var KO = {
   "Opened in {s} s. {found}": "{s}\uCD08 \uB9CC\uC5D0 \uC5F4\uC5C8\uC2B5\uB2C8\uB2E4. {found}",
   "Opening {name}\u2026": "{name|\uC744} \uC5EC\uB294 \uC911\u2026",
   "Open\u2026": "\uC5F4\uAE30\u2026",
-  "Orange": "\uC8FC\uD669",
   "Orders": "\uBA85\uB839",
   "Overlays": "\uC624\uBC84\uB808\uC774",
   "Packing {n} files\u2026": "\uD30C\uC77C {n}\uAC1C\uB97C \uBB36\uB294 \uC911\u2026",
@@ -7466,13 +7835,11 @@ var KO = {
   "Playing {map} with {name} ({n} files, {hash}).": "{name|\uC73C\uB85C} {map} \uD50C\uB808\uC774 \uC911 (\uD30C\uC77C {n}\uAC1C, {hash}).",
   "Portraits": "\uCD08\uC0C1\uD654",
   "Preview": "\uBBF8\uB9AC \uBCF4\uAE30",
-  "Purple": "\uBCF4\uB77C",
   'Read the game\'s state, so taken as "no": {names}.': '\uAC8C\uC784 \uC0C1\uD0DC\uB97C \uC77D\uC73C\uBBC0\uB85C "\uC544\uB2C8\uC624"\uB85C \uCC98\uB9AC: {names}.',
   "Reading\u2026": "\uC77D\uB294 \uC911\u2026",
   "Recorded {s} s.": "{s}\uCD08\uB97C \uB179\uC74C\uD588\uC2B5\uB2C8\uB2E4.",
   "Recording\u2026 press Stop Recording when done.": "\uB179\uC74C \uC911\u2026 \uB05D\uB098\uBA74 \uB179\uC74C \uC911\uC9C0\uB97C \uB204\uB974\uC138\uC694.",
   "Record\u2026": "\uB179\uC74C\u2026",
-  "Red": "\uBE68\uAC15",
   "Replace\u2026": "\uBC14\uAFB8\uAE30\u2026",
   "Restart": "\uCC98\uC74C\uBD80\uD130",
   "Row": "\uD589",
@@ -7505,10 +7872,8 @@ var KO = {
   "Strings": "\uBB38\uC790\uC5F4",
   "Supply goes in halves.": "\uBCF4\uAE09\uC740 0.5 \uB2E8\uC704\uC785\uB2C8\uB2E4.",
   "Tables": "\uD45C",
-  "Teal": "\uCCAD\uB85D",
-  "Team colour (tunit.pcx)": "\uD300 \uC0C9 (tunit.pcx)",
-  "Team colour: row {n}": "\uD300 \uC0C9: {n}\uBC88 \uD589",
-  "Team colour: {name}": "\uD300 \uC0C9: {name}",
+  "Team colour: player {n}": "\uD300 \uC0C9: \uD50C\uB808\uC774\uC5B4 {n}",
+  "Team colour": "\uD300 \uC0C9",
   "Technologies": "\uAE30\uC220",
   "Text": "\uD14D\uC2A4\uD2B8",
   "The animation ended.": "\uC560\uB2C8\uBA54\uC774\uC158\uC774 \uB05D\uB0AC\uC2B5\uB2C8\uB2E4.",
@@ -7549,10 +7914,8 @@ var KO = {
   "Weapons": "\uBB34\uAE30",
   "What changed in {name}": "{name}\uC758 \uBCC0\uACBD \uB0B4\uC5ED",
   "What changed: against the game, or against the mod as it was opened": "\uBCC0\uACBD \uB0B4\uC5ED: \uAC8C\uC784\uACFC, \uB610\uB294 \uC5F4\uC5C8\uC744 \uB54C\uC758 \uBAA8\uB4DC\uC640 \uBE44\uAD50",
-  "White": "\uD770\uC0C9",
   "Working out the mod's hash over {size}\u2026": "{size}\uC5D0 \uB300\uD55C \uBAA8\uB4DC \uD574\uC2DC\uB97C \uACC4\uC0B0\uD558\uB294 \uC911\u2026",
   "Writing {name}\u2026": "{name|\uC744} \uC4F0\uB294 \uC911\u2026",
-  "Yellow": "\uB178\uB791",
   "a folder of the game's files": "\uAC8C\uC784 \uD30C\uC77C \uD3F4\uB354",
   "a mod folder": "\uBAA8\uB4DC \uD3F4\uB354",
   "a self-executing mod (its archive read, nothing run)": "\uC790\uB3D9 \uC2E4\uD589 \uBAA8\uB4DC (\uC544\uCE74\uC774\uBE0C\uB9CC \uC77D\uACE0 \uC2E4\uD589\uD558\uC9C0 \uC54A\uC74C)",
@@ -7874,56 +8237,11 @@ var PlayTab = class {
 };
 
 // reader.ts
-function storedPathOf(member) {
-  const k = gameName(member);
-  const renamed = RENAMED[k];
-  if (renamed) return renamed;
-  const m = /^tileset\\([a-z]+)\\([^\\]+)$/.exec(k);
-  if (m) return `tileset/${m[1]}.${m[2]}`;
-  return k.replace(/\\/g, "/");
-}
-var RENAMED = { "rez\\stat_txt.tbl": "tileset/stat_txt.tbl" };
-var TABLE_FILE = /^arr\\([a-z]+)\.dat(ex)?$/;
-var OPTIONAL = ["rez\\unitnames.tbl", "unit\\cmdbtns\\uniticons.grp"];
-function manifestFor(base, members) {
-  const out = { ...base ?? {} };
-  const datex = new Set(base?.datex ?? []);
-  const optional = new Set(base?.optional ?? []);
-  for (const m of members) {
-    const k = gameName(m);
-    const table = TABLE_FILE.exec(k);
-    if (table) {
-      if (table[2]) datex.add(table[1]);
-      else datex.delete(table[1]);
-    }
-    if (OPTIONAL.includes(k)) optional.add(storedPathOf(k));
-  }
-  out.datex = [...datex].sort();
-  out.optional = [...optional].sort();
-  return out;
-}
-function attachReader(files, off = () => false) {
-  let index = null;
-  let manifest = null;
-  const reader = async (path) => {
-    const clean = path.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
-    if (off(clean)) return null;
-    if (!index) {
-      index = /* @__PURE__ */ new Map();
-      for (const m of files.members()) index.set(storedPathOf(m), gameName(m));
-    }
-    if (clean === "unit/manifest.json") {
-      manifest ??= new TextEncoder().encode(JSON.stringify(manifestFor(files.baseManifest, files.members())));
-      return manifest;
-    }
-    const member = index.get(clean);
-    return member ? files.read(member) : null;
+function attachReader(files) {
+  return async (_path, file) => {
+    const member = file?.member ? gameName(file.member) : null;
+    return member && files.has(member) ? files.read(member) : null;
   };
-  const invalidate = () => {
-    index = null;
-    manifest = null;
-  };
-  return { reader, invalidate };
 }
 
 // node_modules/fflate/esm/browser.js
@@ -10884,7 +11202,10 @@ function exportPng(bytes, palette, member) {
 // look.ts
 var Look = class {
   palette = "jungle";
-  /** A `tunit.pcx` row, or -1 for none. */
+  /**
+   * The player whose colour the team slots take, or -1 for none. The editor's own drawing colours a player as the open
+   * map does; the plugin's (sheets, the preview) takes the `tunit.pcx` row of the player's default colour.
+   */
   team = 0;
   wpe = /* @__PURE__ */ new Map();
   tunit;
@@ -11383,7 +11704,6 @@ var AnimPreview = class {
 };
 
 // picturesView.ts
-var TEAM_NAMES = [msg2("Red"), msg2("Blue"), msg2("Teal"), msg2("Purple"), msg2("Orange"), msg2("Brown"), msg2("White"), msg2("Yellow")];
 var PicturesView = class {
   el;
   ctx;
@@ -11429,12 +11749,12 @@ var PicturesView = class {
     palette.value = this.look.palette;
     const team = h(
       "select",
-      { title: t2("Team colour (tunit.pcx)"), onchange: () => {
+      { title: t2("Team colour"), onchange: () => {
         this.look.team = Number(team.value);
         this.draw();
       } },
       h("option", { value: "-1" }, t2("No team colour")),
-      ...Array.from({ length: 16 }, (_, i2) => h("option", { value: String(i2) }, TEAM_NAMES[i2] ? t2("Team colour: {name}", { name: translate2(TEAM_NAMES[i2]) }) : t2("Team colour: row {n}", { n: i2 })))
+      ...Array.from({ length: 12 }, (_, i2) => h("option", { value: String(i2) }, t2("Team colour: player {n}", { n: i2 + 1 })))
     );
     team.value = String(this.look.team);
     this.modeBar = h("span", { className: "mx-bar", style: "padding: 0" });
@@ -11593,6 +11913,16 @@ var PicturesView = class {
     const c22 = canvas.getContext("2d");
     c22.imageSmoothingEnabled = false;
     c22.drawImage(off, 0, 0, canvas.width, canvas.height);
+    canvas.dataset.drawnBy = "plugin";
+    if (this.ctx.api.document.info()?.tileset === this.look.palette) {
+      const frame = this.frame, bytes = this.bytes;
+      void this.ctx.api.graphics.grpImage(bytes, frame, { palette: this.look.palette, teamColor: this.look.team >= 0 ? this.look.team : null }).then((pic) => {
+        if (!pic || !canvas.isConnected || frame !== this.frame || bytes !== this.bytes) return;
+        c22.clearRect(0, 0, canvas.width, canvas.height);
+        c22.drawImage(pic.image, 0, 0, canvas.width, canvas.height);
+        canvas.dataset.drawnBy = "editor";
+      });
+    }
     const slider = h("input", { type: "range", min: "0", max: String(grp.frames.length - 1), value: String(this.frame), style: "width: 240px", oninput: () => {
       this.frame = Number(slider.value);
       this.draw();
@@ -12132,30 +12462,6 @@ var ScriptsView = class {
 
 // wav.ts
 var GAME_WAV = { sampleRate: 22050, channels: 1, bits: 16 };
-function decodePcmWav2(bytes) {
-  const info = parseWavHeader(bytes);
-  if (!info || info.format !== 1 && info.format !== 3) return null;
-  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const start = info.dataOffset, size = info.dataLength;
-  const width = info.bitsPerSample / 8, n = info.channels;
-  const frames = Math.floor(size / (width * n));
-  const float = info.format === 3;
-  const channels = Array.from({ length: n }, () => new Float32Array(frames));
-  for (let f = 0; f < frames; f++) {
-    for (let c3 = 0; c3 < n; c3++) {
-      const o = start + (f * n + c3) * width;
-      let s;
-      if (float && width === 4) s = v.getFloat32(o, true);
-      else if (width === 1) s = (bytes[o] - 128) / 128;
-      else if (width === 2) s = v.getInt16(o, true) / 32768;
-      else if (width === 3) s = ((bytes[o] | bytes[o + 1] << 8 | bytes[o + 2] << 16) << 8 >> 8) / 8388608;
-      else if (width === 4) s = v.getInt32(o, true) / 2147483648;
-      else return null;
-      channels[c3][f] = s;
-    }
-  }
-  return { sampleRate: info.sampleRate, channels };
-}
 function resample(pcm, target) {
   const mono = pcm.channels.length === 1 ? pcm.channels[0] : null;
   const src = target.channels === 1 ? [mono ?? pcm.channels[0].map((_, i2) => pcm.channels.reduce((sum, ch3) => sum + ch3[i2], 0) / pcm.channels.length)] : [pcm.channels[0], pcm.channels[1] ?? pcm.channels[0]];
@@ -12171,51 +12477,13 @@ function resample(pcm, target) {
     return out;
   });
 }
-function encodeWav2(channels, sampleRate, bits2) {
-  const n = channels.length, frames = channels[0]?.length ?? 0, width = bits2 / 8;
-  const data = frames * n * width;
-  const out = new Uint8Array(44 + data + (data & 1));
-  const v = new DataView(out.buffer);
-  const tag2 = (at, s) => {
-    for (let i2 = 0; i2 < 4; i2++) out[at + i2] = s.charCodeAt(i2);
-  };
-  tag2(0, "RIFF");
-  v.setUint32(4, out.length - 8, true);
-  tag2(8, "WAVE");
-  tag2(12, "fmt ");
-  v.setUint32(16, 16, true);
-  v.setUint16(20, 1, true);
-  v.setUint16(22, n, true);
-  v.setUint32(24, sampleRate, true);
-  v.setUint32(28, sampleRate * n * width, true);
-  v.setUint16(32, n * width, true);
-  v.setUint16(34, bits2, true);
-  tag2(36, "data");
-  v.setUint32(40, data, true);
-  let o = 44;
-  for (let f = 0; f < frames; f++) {
-    for (let c3 = 0; c3 < n; c3++) {
-      const s = Math.max(-1, Math.min(1, channels[c3][f]));
-      if (bits2 === 16) {
-        v.setInt16(o, Math.round(s < 0 ? s * 32768 : s * 32767), true);
-        o += 2;
-      } else {
-        out[o] = Math.round(s * 127 + 128);
-        o += 1;
-      }
-    }
-  }
-  return out;
-}
 async function convertToWav(bytes, target, decode) {
   const info = parseWavHeader(bytes);
-  if (info && info.format === 1 && info.sampleRate === target.sampleRate && info.channels === target.channels && info.bitsPerSample === target.bits) {
-    const pcm2 = decodePcmWav2(bytes);
-    return { bytes, converted: false, seconds: pcm2 ? pcm2.channels[0].length / pcm2.sampleRate : 0 };
-  }
-  const pcm = decodePcmWav2(bytes) ?? (decode ? await decode(bytes) : null);
+  const pcm = decodeWav(bytes) ?? (decode ? await decode(bytes).catch(() => null) : null);
   if (!pcm) throw new Error("not a sound this page can read");
-  return { bytes: encodeWav2(resample(pcm, target), target.sampleRate, target.bits), converted: true, seconds: pcm.channels[0].length / pcm.sampleRate };
+  const seconds = (pcm.channels[0]?.length ?? 0) / pcm.sampleRate;
+  if (info && isPlainPcm(info) && info.sampleRate === target.sampleRate && info.channels === target.channels && info.bitsPerSample === target.bits) return { bytes, converted: false, seconds };
+  return { bytes: encodeWav(resample(pcm, target), target.sampleRate, target.bits), converted: true, seconds };
 }
 async function browserDecode(bytes) {
   const ctx = new OfflineAudioContext(1, 1, 44100);
@@ -12372,7 +12640,7 @@ var SoundsView = class {
     }
     this.audio ??= new AudioContext();
     try {
-      const pcm = decodePcmWav2(bytes);
+      const pcm = decodeWav(bytes);
       let buffer;
       if (pcm) {
         buffer = this.audio.createBuffer(pcm.channels.length, Math.max(1, pcm.channels[0].length), pcm.sampleRate);
@@ -13266,6 +13534,9 @@ async function openTextFolder(root, manifest, pieces, name, base) {
     names = namesOf(tables2, { stat: await tbl("rez\\stat_txt.tbl"), unitnames: await tbl("rez\\unitnames.tbl"), images: await tbl("arr\\images.tbl"), sfxdata: await tbl("arr\\sfxdata.tbl"), portdata: null, mapdata: null });
   }
   return source;
+}
+function looksLikeMod(paths) {
+  return paths.some((p) => /^[^/]+\/([^/]+\/)?(arr\/[^/]+\.dat(ex)?|scripts\/[^/]+\.bin|rez\/[^/]+\.tbl|unit\/.+\.grp)$/i.test(p) || /^[^/]+\/mod\.json$/i.test(p));
 }
 
 // stringsView.ts
@@ -14605,7 +14876,14 @@ function activate(api) {
   const editor = new ModEditor(api);
   api.commands.register({ id: "open", title: msg2("Open a Mod\u2026"), run: (...args) => editor.openCommand(args[0]) });
   api.menu.add("File", { label: msg2("Open a Mod\u2026"), after: "Open Recent", command: "open" });
-  api.ui.fileType({ name: t2("StarCraft mod"), extensions: [".mpq", ".exe", ".zip"], open: (files) => editor.openFiles(files.map((f) => ({ path: f.name, size: f.size, read: async () => new Uint8Array(await f.arrayBuffer()) })), files[0]?.name ?? "mod") });
+  api.ui.fileType({
+    name: t2("StarCraft mod"),
+    extensions: [".mpq", ".exe", ".zip"],
+    open: (files) => editor.openFiles(files.map(filePiece), files[0]?.name ?? "mod"),
+    // A folder dropped anywhere on the editor: a mod when it holds the game's folders at its root or one down.
+    acceptsFolder: (paths) => looksLikeMod(paths),
+    openFolder: (files) => editor.openFiles(files.map(folderPiece), files[0]?.path.split("/")[0] ?? "mod")
+  });
   api.events.on("language", () => editor.relabel());
   api.events.on("gameData", () => editor.sourceChanged());
   const watching = api.services.watch(LIVE_SERVICE, (service) => editor.liveService(service));
@@ -14641,10 +14919,9 @@ var ModEditor = class {
   attached = null;
   before = null;
   reader = null;
-  /** Paths the plugin is reading from the copy underneath at this moment: the reader answers nothing for them. */
-  quiet = /* @__PURE__ */ new Map();
   /** The game's small files (tables, string tables, iscript, the unit manifest) as read before the mod was laid over them. */
   baseCache = /* @__PURE__ */ new Map();
+  /** The copy's unit list, for which GRPs and overlays it has without reading each. */
   baseManifest = null;
   update = { timer: 0, running: false, again: false };
   playTab = null;
@@ -14659,9 +14936,10 @@ var ModEditor = class {
     this.live.setService(this.liveSvc);
     if (this.session) this.draw();
   }
+  /** The game data API when the editor can draw from a set in memory (an editor from before it cannot). */
   get gameData() {
     const g = this.api.gameData;
-    return typeof g.attach === "function" && typeof g.reload === "function" ? g : null;
+    return typeof g.attach === "function" && typeof g.rehash === "function" ? g : null;
   }
   /* ── The panel ── */
   ensurePanel() {
@@ -14806,13 +15084,6 @@ var ModEditor = class {
     this.tables.show(table, id, field);
   }
   openScreen() {
-    const folder = h("input", { type: "file", multiple: true, style: "display: none" });
-    folder.setAttribute("webkitdirectory", "");
-    folder.addEventListener("change", () => {
-      const files = [...folder.files ?? []];
-      if (files.length) void this.openFiles(files.map(filePiece), (files[0].webkitRelativePath || files[0].name).split("/")[0]);
-      folder.value = "";
-    });
     const zone = h(
       "div",
       { className: "mx-empty", dataset: { drop: "mods" } },
@@ -14821,10 +15092,9 @@ var ModEditor = class {
       h(
         "div",
         { className: "mx-bar", style: "justify-content: center" },
-        button(t2("Choose a Folder\u2026"), () => folder.click(), { primary: true }),
+        button(t2("Choose a Folder\u2026"), () => void this.pickFolder(), { primary: true }),
         button(t2("Choose a File\u2026"), () => void this.pickFile())
-      ),
-      folder
+      )
     );
     zone.addEventListener("dragover", (e) => {
       e.preventDefault();
@@ -14841,6 +15111,10 @@ var ModEditor = class {
       });
     });
     return zone;
+  }
+  async pickFolder() {
+    const files = await this.api.ui.pickFiles({ directory: true });
+    if (files.length) await this.openFiles(files.map(folderPiece), files[0].path.split("/")[0]);
   }
   async pickFile() {
     const files = await this.api.ui.pickFiles({ accept: ".mpq,.exe,.zip", multiple: false });
@@ -14897,12 +15171,7 @@ var ModEditor = class {
       this.said = t2("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1e3).toFixed(1), found: this.found });
       this.api.ui.status(this.found);
       this.draw();
-      if (base) {
-        this.say(t2("Comparing the mod's files with the game's\u2026"));
-        await session.changedMembers();
-        this.said = t2("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1e3).toFixed(1), found: this.found });
-      }
-      await this.attach(true);
+      await this.attach();
     } catch (e) {
       this.session = null;
       this.say(e instanceof OpenError ? e.message : t2("The mod could not be opened: {error}", { error: e instanceof Error ? e.message : String(e) }));
@@ -14932,23 +15201,20 @@ var ModEditor = class {
     if (disposing) this.panel?.close();
   }
   /* ── The game's own files, read past the mod ── */
+  /**
+   * A file of the game beneath the mod, by member: `gameData.read(…, { under: true })` reads the set the mod is laid
+   * over without asking the mod's reader. Only paths the editor's copy keeps are asked; the small files are kept.
+   */
   async baseRead(member) {
-    const stored = storedPathOf(member);
+    const stored = this.api.gameData.storedPath(member);
     if (!COPY_HOLDS.test(stored)) return null;
     if (this.baseCache.has(stored)) return this.baseCache.get(stored);
-    this.quiet.set(stored, (this.quiet.get(stored) ?? 0) + 1);
-    try {
-      const bytes = await this.api.gameData.read(stored);
-      if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
-      return bytes;
-    } finally {
-      const n = this.quiet.get(stored) - 1;
-      if (n) this.quiet.set(stored, n);
-      else this.quiet.delete(stored);
-    }
+    const bytes = await this.api.gameData.read(stored, { under: true });
+    if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
+    return bytes;
   }
   async readBaseManifest() {
-    const bytes = await this.baseRead("unit\\manifest.json");
+    const bytes = await this.api.gameData.read("unit/manifest.json", { under: true });
     try {
       this.baseManifest = bytes ? JSON.parse(new TextDecoder().decode(bytes)) : null;
     } catch {
@@ -14957,7 +15223,7 @@ var ModEditor = class {
   }
   /** Whether the copy has a member, from its unit manifest where that lists it (no fetch), else by reading it. */
   async baseHas(member) {
-    const stored = storedPathOf(member);
+    const stored = this.api.gameData.storedPath(member);
     if (!COPY_HOLDS.test(stored)) return null;
     const m = this.baseManifest;
     const under = stored.startsWith("unit/") && !stored.startsWith("unit/cmdbtns/") ? stored.slice(5).replace(/\//g, "\\") : null;
@@ -14976,36 +15242,33 @@ var ModEditor = class {
     return !!s && s.kind === "reader" && !!this.attached && s.profile.id === this.attached.profile.id;
   }
   /**
-   * Hands the editor a reader over the mod's current files. The hash (over the files that differ from the game's)
-   * is what a map saved now records; it is worked out once the editor already draws from the mod when the mod is
-   * large, and the reader is handed over again with it.
+   * Hands the editor a reader over the mod's current files. The hash (over the files that differ from the game's) is
+   * what a map saved now records: a small mod's goes with the reader, a large one's follows by `rehash` once worked out,
+   * the editor drawing from the mod meanwhile.
    */
-  async attach(first) {
+  async attach() {
     const gd = this.gameData;
     const session = this.session;
     if (!gd || !session) {
       this.status();
       return;
     }
-    if (first) {
-      const now = this.api.gameData.source();
-      this.before = now && now.kind !== "reader" ? now.profile.id : this.before;
-      this.reader = attachReader({ members: () => session.members(), read: (m) => session.read(m), baseManifest: this.baseManifest }, (path) => this.quiet.has(path));
-    }
+    const now = this.api.gameData.source();
+    this.before = now && now.kind !== "reader" ? now.profile.id : this.before;
+    this.reader = attachReader({ has: (m) => session.has(m), read: (m) => session.read(m) });
     const profile = this.profile();
     const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
-    let hash = null;
-    if (!first || bytes < 64 * 1024 * 1024) hash = await session.hash();
+    const hash = bytes < 64 * 1024 * 1024 ? await session.hash() : null;
     if (this.session !== session) return;
-    const source = await gd.attach(profile, this.reader.reader, hash ? { hash } : void 0);
+    const source = await gd.attach(profile, this.reader, hash ? { hash } : void 0);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
     this.status();
     if (!hash) {
       this.say(t2("Working out the mod's hash over {size}\u2026", { size: sizeText(bytes) }));
       const later = await session.hash();
-      if (this.session !== session) return;
-      const again = await gd.attach(profile, this.reader.reader, { hash: later });
-      this.attached = { profile, hash: later, label: this.attachedLabel(again.label, later) };
+      if (this.session !== session || !this.isOurs()) return;
+      const again = gd.rehash(later);
+      this.attached = { profile, hash: later, label: this.attachedLabel(again?.label ?? source.label, later) };
       this.say(t2("The mod's hash is {hash}.", { hash: later }));
     }
   }
@@ -15039,14 +15302,17 @@ var ModEditor = class {
     if (!gd || !session || !this.reader) return;
     this.update.running = true;
     try {
-      this.reader.invalidate();
-      const hash = await session.hash();
-      if (this.session !== session) return;
-      if (!this.attached || !this.isOurs() || hash !== this.attached.hash) {
-        const profile = this.profile();
-        const source = await gd.attach(profile, this.reader.reader, { hash });
-        this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
-      } else gd.reload();
+      if (!this.attached || !this.isOurs()) {
+        await this.attach();
+      } else {
+        gd.reload();
+        const hash = await session.hash();
+        if (this.session !== session) return;
+        if (hash !== this.attached.hash) {
+          const source = gd.rehash(hash);
+          this.attached = { profile: this.attached.profile, hash, label: this.attachedLabel(source?.label ?? "", hash) };
+        }
+      }
       const edited = await session.edited();
       this.said = edited.length ? t2("{n, plural, one {{count} file edited} other {{count} files edited}}: {files}.", { n: edited.length, count: num2(edited.length), files: edited.slice(0, 4).map((k) => session.nameOf(k)).join(", ") + (edited.length > 4 ? " \u2026" : "") }) : t2("No file differs from the mod as it was opened.");
       this.status();
@@ -15257,6 +15523,9 @@ var ModEditor = class {
     });
   }
 };
+function folderPiece(f) {
+  return { path: f.path, size: f.file.size, read: async () => new Uint8Array(await f.file.arrayBuffer()) };
+}
 function filePiece(f) {
   return { path: f.webkitRelativePath || f.name, size: f.size, read: async () => new Uint8Array(await f.arrayBuffer()) };
 }

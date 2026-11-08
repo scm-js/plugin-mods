@@ -88,27 +88,27 @@ describe("an edit", () => {
 });
 
 describe("what the editor is handed", () => {
-  it("the attach reader answers the edited table and leaves the rest to the copy underneath", async () => {
+  it("the attach reader answers the edited table by its member and leaves the rest to the set underneath", async () => {
     const s = await open();
     s.setField({ table: "units", id: 0, field: "hit_points", value: 45 * 256 });
-    const { reader } = attachReader({ members: () => s.members(), read: (m) => s.read(m), baseManifest: { datex: [], optional: [], images: [1] } });
-    expect(decodeDat("units", (await reader("arr/units.dat"))!).columns.hit_points[0]).toBe(45 * 256);
-    expect(equal(await reader("arr/weapons.dat"), await s.original("arr\\weapons.dat"))).toBe(true);
-    expect(decodeTblFile((await reader("tileset/stat_txt.tbl"))!).strings[0]).toBe("Terran Marine\0*\0Ground Units\0");
-    expect(await reader("arr/flingy.dat")).toBeNull();
-    expect(await reader("unit/terran/marine.grp")).toBeNull();
-    expect(JSON.parse(new TextDecoder().decode((await reader("unit/manifest.json"))!))).toEqual({ datex: [], optional: [], images: [1] });
+    const reader = attachReader({ has: (m) => s.has(m), read: (m) => s.read(m) });
+    const ask = (path: string, member: string | null) => Promise.resolve(reader(path, { member, under: async () => null }));
+    expect(decodeDat("units", (await ask("arr/units.dat", "arr\\units.dat"))!).columns.hit_points[0]).toBe(45 * 256);
+    expect(equal((await ask("arr/weapons.dat", "arr\\weapons.dat")) ?? null, await s.original("arr\\weapons.dat"))).toBe(true);
+    // The editor names the member: the copy's own layout (stat_txt kept beside the tilesets) is not the plugin's to know.
+    expect(decodeTblFile((await ask("tileset/stat_txt.tbl", "rez\\stat_txt.tbl"))!).strings[0]).toBe("Terran Marine\0*\0Ground Units\0");
+    expect(await ask("arr/flingy.dat", "arr\\flingy.dat")).toBeNull();
+    expect(await ask("unit/terran/marine.grp", "unit\\terran\\marine.grp")).toBeNull();
+    // The copy's own lists are the editor's to work out.
+    expect(await ask("unit/manifest.json", null)).toBeNull();
   });
 
-  it("a .datex table is read as one, and the mod's names are listed", async () => {
-    const { reader } = attachReader({ members: () => ["arr\\units.datex", "arr\\flingy.dat", "rez\\unitnames.tbl"], read: async () => new Uint8Array(1), baseManifest: { datex: ["flingy"], optional: [] } });
-    expect(JSON.parse(new TextDecoder().decode((await reader("unit/manifest.json"))!))).toEqual({ datex: ["units"], optional: ["rez/unitnames.tbl"] });
-    expect(await reader("arr/units.datex")).not.toBeNull();
-    let off = "arr/units.dat";
-    const quiet = attachReader({ members: () => ["arr\\units.dat"], read: async () => new Uint8Array(1), baseManifest: null }, (path) => path === off);
-    expect(await quiet.reader("arr/units.dat")).toBeNull();
-    off = "";
-    expect(await quiet.reader("arr/units.dat")).not.toBeNull();
+  it("a dropped folder is taken for a mod when it holds the game's folders at its root or one down", async () => {
+    const { looksLikeMod } = await import("../source");
+    expect(looksLikeMod(madeFolder().map((p) => p.path))).toBe(true);
+    expect(looksLikeMod(["release/mpq/arr/units.datex", "release/readme.md"])).toBe(true);
+    expect(looksLikeMod(["text/mod.json", "text/tables/units.txt"])).toBe(true);
+    expect(looksLikeMod(["photos/a.jpg", "photos/arr.txt"])).toBe(false);
   });
 
   it("the hash is the shared rule's", async () => {

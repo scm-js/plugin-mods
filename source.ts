@@ -245,3 +245,8 @@ async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece
   }
   return source;
 }
+
+/** A folder of a mod: the game's folders (or a mod folder's manifest) at its root or one folder down. */
+export function looksLikeMod(paths: readonly string[]): boolean {
+  return paths.some((p) => /^[^/]+\/([^/]+\/)?(arr\/[^/]+\.dat(ex)?|scripts\/[^/]+\.bin|rez\/[^/]+\.tbl|unit\/.+\.grp)$/i.test(p) || /^[^/]+\/mod\.json$/i.test(p));
+}

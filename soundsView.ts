@@ -9,7 +9,8 @@ import { button, clear, h } from "./dom";
 import { t } from "./i18n";
 import { num, sizeText } from "./info";
 import type { ViewContext } from "./tablesView";
-import { GAME_WAV, browserDecode, convertToWav, decodePcmWav } from "./wav";
+import { decodeWav } from "@scm-js/core";
+import { GAME_WAV, browserDecode, convertToWav } from "./wav";
 
 const ROW = 22;
 
@@ -137,7 +138,7 @@ export class SoundsView {
     if (!bytes) { this.ctx.say(t("{file} is in neither the mod nor the game's files here.", { file })); return; }
     this.audio ??= new AudioContext();
     try {
-      const pcm = decodePcmWav(bytes);
+      const pcm = decodeWav(bytes);
       let buffer: AudioBuffer;
       if (pcm) {
         buffer = this.audio.createBuffer(pcm.channels.length, Math.max(1, pcm.channels[0].length), pcm.sampleRate);
