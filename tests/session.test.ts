@@ -144,6 +144,11 @@ describe("saving", () => {
     const again = await ModSession.open(await openPieces(files.map((f) => bytesPiece(`made-text/${f.file}`, f.data)), "made-text"), { base: null });
     expect(again.source.kind).toBe("mod folder");
     for (const k of s.members()) expect(equal(await again.read(k), await s.read(k)), k).toBe(true);
+    // The same folder in a zip, as Save as Folder hands it over.
+    const zipped = await ModSession.open(await openPieces([bytesPiece("made.zip", writeZip(files, "made"))], "made.zip"), { base: null });
+    expect(zipped.source.kind).toBe("mod folder");
+    expect(zipped.source.name).toBe("made");
+    for (const k of s.members()) expect(equal(await zipped.read(k), await s.read(k)), k).toBe(true);
   });
 });
 

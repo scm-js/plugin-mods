@@ -7,6 +7,7 @@
  * a picker instead of the disk. No DOM is needed, so the tests run it in Node.
  */
 import { Archive } from "mopaq";
+import { t } from "./i18n";
 import {
   DAT_SCHEMAS, DAT_TABLES, MOD_MANIFEST, decodeTblFile, entryText, exeArchive, gameName, isMpq, isZip, memberOf, modRoot, namesOf, packFile, readManifest, readZip,
   decodeDat, datTableOf, type DatTableName, type ModData, type ModManifest, type ModNames,
@@ -80,16 +81,26 @@ const leaf = (p: string) => p.split("/").pop()!;
  * files by member name, for a text folder whose AI script names units by the game's string tables.
  */
 export async function openPieces(pieces: Piece[], name: string, base: ((member: string) => Promise<Uint8Array | null>) | null = null): Promise<ModSource> {
-  if (!pieces.length) throw new OpenError("Nothing was handed over.");
+  if (!pieces.length) throw new OpenError(t("Nothing was handed over."));
   const textFolder = await findTextFolder(pieces);
   if (textFolder) return openTextFolder(textFolder.root, textFolder.manifest, pieces, name, base);
   const single = pieces.length === 1 && !pieces[0].path.includes("/");
+  // A zip may hold a text folder (Save as Folder writes one): looked into before it is taken as the game's files.
+  if (single && /\.zip$/i.test(pieces[0].path)) {
+    const bytes = await pieces[0].read();
+    if (!isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
+    let members;
+    try { members = readZip(bytes); } catch (e) { throw new OpenError(t("{file}: {error}", { file: pieces[0].path, error: (e as Error).message })); }
+    const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
+    const folder = await findTextFolder(inside);
+    if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
+  }
   const lower = pieces[0].path.toLowerCase();
   const kind: SourceKind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") ? "exe" : "archive";
   if (single) {
     const bytes = await pieces[0].read();
-    if (kind === "zip" && !isZip(bytes)) throw new OpenError(`${pieces[0].path} is not a zip.`);
-    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(`${pieces[0].path} is not a mod: not an MPQ, a self-executing exe or a zip.`);
+    if (kind === "zip" && !isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
+    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(t("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: pieces[0].path }));
     const piece: Piece = { path: pieces[0].path, size: bytes.length, read: async () => bytes };
     return fromPieces(kind, name.replace(/\.(mpq|exe|zip)$/i, ""), [piece]);
   }
@@ -115,15 +126,15 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
       if (l.endsWith(".zip") && isZip(bytes)) {
         if (depth > 2) continue;
         let members;
-        try { members = readZip(bytes); } catch (e) { throw new OpenError(`${p.path}: ${(e as Error).message}`); }
+        try { members = readZip(bytes); } catch (e) { throw new OpenError(t("{file}: {error}", { file: p.path, error: (e as Error).message })); }
         const prefix = list.length === 1 && depth === 0 ? "" : p.path.replace(/\.zip$/i, "") + "/";
         await take(members.map((m) => ({ path: `${prefix}${m.path}`, size: m.size, read: m.read })), depth + 1);
       } else if (l.endsWith(".mpq") && isMpq(bytes)) {
-        try { archives.push({ label: p.path, archive: Archive.open(bytes) }); } catch (e) { throw new OpenError(`${p.path} could not be opened as an archive: ${(e as Error).message}`); }
+        try { archives.push({ label: p.path, archive: Archive.open(bytes) }); } catch (e) { throw new OpenError(t("{file} could not be opened as an archive: {error}", { file: p.path, error: (e as Error).message })); }
       } else if (l.endsWith(".exe")) {
         const found = exeArchive(bytes);
         if (!found) { source.left.push(p.path); continue; }
-        try { archives.push({ label: p.path, archive: Archive.open(found.archive) }); } catch (e) { throw new OpenError(`The archive inside ${p.path} could not be opened: ${(e as Error).message}`); }
+        try { archives.push({ label: p.path, archive: Archive.open(found.archive) }); } catch (e) { throw new OpenError(t("The archive inside {file} could not be opened: {error}", { file: p.path, error: (e as Error).message })); }
         source.exes.push({ file: p.path, kind: found.kind, at: found.at, plugins: found.plugins });
       } else loose.push(p);
     }
@@ -209,7 +220,7 @@ async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece
     for (const member of of.form === "ai" ? of.members : [of.members[0]]) {
       const read = async () => {
         const got = (await pack(p)).find((m) => gameName(m.member) === gameName(member));
-        if (!got) throw new OpenError(`${p.path} gave no ${member}`);
+        if (!got) throw new OpenError(t("{file} gave no {member}.", { file: p.path, member }));
         return got.data;
       };
       source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path });

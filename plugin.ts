@@ -48,6 +48,8 @@ export default function activate(api: PluginApi) {
 
 /** What the copy of the game the editor draws from keeps, by its paths: the rest it cannot say anything about. */
 const COPY_HOLDS = /^(arr\/[^/]+$|scripts\/iscript\.bin$|unit\/|tileset\/|game\/|rez\/unitnames\.tbl$)/;
+/** The game's files the plugin keeps once read: small, and read again by every diff, check and string table. */
+const SMALL = /^(arr\/[^/]+$|scripts\/iscript\.bin$|tileset\/stat_txt\.tbl$|rez\/unitnames\.tbl$|unit\/manifest\.json$)/;
 
 type Tab = "tables" | "strings" | "scripts";
 
@@ -68,6 +70,8 @@ class ModEditor {
   private before: string | null = null;
   private reader: ReturnType<typeof attachReader> | null = null;
   private quiet = 0;
+  /** The game's small files (tables, string tables, iscript, the unit manifest) as read before the mod was laid over them. */
+  private readonly baseCache = new Map<string, Uint8Array | null>();
   private baseManifest: (UnitManifest & { grps?: string[]; overlays?: string[] }) | null = null;
   private update = { timer: 0, running: false, again: false };
   private playTab: PlayTab | null = null;
@@ -222,11 +226,12 @@ class ModEditor {
     this.ensurePanel();
     if (this.session && !(await this.api.ui.confirm(t("Close {name} and open another mod? Changes not saved are lost.", { name: this.session.source.name })))) return;
     this.opening = true;
-    this.closeMod(false);
+    this.closeMod(false, false);
     this.say(t("Opening {name}…", { name }));
     try {
       const t0 = performance.now();
       const base = this.api.gameData.source()?.kind === "none" ? null : (member: string) => this.baseRead(member);
+      this.baseCache.clear();
       if (base) await this.readBaseManifest();
       const source = await openPieces(pieces, name, base);
       const session = await ModSession.open(source, { base, baseHas: base ? (m) => this.baseHas(m) : undefined });
@@ -237,6 +242,8 @@ class ModEditor {
       this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1000).toFixed(1), found: this.found });
       this.api.ui.status(this.found);
       this.draw();
+      // Which files differ from the game's is read now, before the editor draws from the mod (see baseRead).
+      if (base) { this.say(t("Comparing the mod's files with the game's…")); await session.changedMembers(); this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1000).toFixed(1), found: this.found }); }
       await this.attach(true);
     } catch (e) {
       this.session = null;
@@ -247,16 +254,17 @@ class ModEditor {
     }
   }
 
-  private closeMod(redraw = true) {
+  /** `restore`: put the editor back on the data set it drew from before (not when another mod is about to replace it). */
+  private closeMod(redraw = true, restore = true) {
     this.scripts?.dispose();
     this.tables = null; this.strings = null; this.scripts = null;
-    const was = this.attached;
+    const ours = !!this.attached && this.isOurs();
     this.session = null;
     this.attached = null;
     this.reader = null;
     clearTimeout(this.update.timer);
     // Put the editor back on the data set it drew from before, if nothing else moved it meanwhile.
-    if (was && this.isOurs()) void this.api.gameData.select(this.before ?? "default").catch(() => undefined);
+    if (ours && restore) void (async () => this.api.gameData.select(this.before ?? (await this.api.gameData.profiles())[0]?.id ?? "starcraft"))().catch(() => undefined);
     this.said = "";
     if (redraw) this.draw();
   }
@@ -272,9 +280,16 @@ class ModEditor {
   private async baseRead(member: string): Promise<Uint8Array | null> {
     const stored = storedPathOf(member);
     if (!COPY_HOLDS.test(stored)) return null;
-    // While the mod is attached every read goes through it first: say nothing for a moment, so the copy answers.
+    if (this.baseCache.has(stored)) return this.baseCache.get(stored)!;
+    // While the mod is attached every read goes through it first: it says nothing for a moment, so the copy answers.
+    // An editor read in that moment would get the copy's file too, so the plugin reads the game's files it needs before
+    // it attaches (the comparisons, the small files kept here) and only an edited member's comparison comes later.
     this.quiet++;
-    try { return await this.api.gameData.read(stored); } finally { this.quiet--; }
+    try {
+      const bytes = await this.api.gameData.read(stored);
+      if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
+      return bytes;
+    } finally { this.quiet--; }
   }
 
   private async readBaseManifest() {

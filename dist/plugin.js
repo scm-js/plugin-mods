@@ -6427,6 +6427,7 @@ var KO = {
   "Close": "\uB2EB\uAE30",
   "Close this mod and open another": "\uC774 \uBAA8\uB4DC\uB97C \uB2EB\uACE0 \uB2E4\uB978 \uBAA8\uB4DC \uC5F4\uAE30",
   "Close {name} and open another mod? Changes not saved are lost.": "{name|\uC744} \uB2EB\uACE0 \uB2E4\uB978 \uBAA8\uB4DC\uB97C \uC5F4\uAE4C\uC694? \uC800\uC7A5\uD558\uC9C0 \uC54A\uC740 \uBCC0\uACBD\uC740 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4.",
+  "Comparing the mod's files with the game's\u2026": "\uBAA8\uB4DC\uC758 \uD30C\uC77C\uC744 \uAC8C\uC784\uC758 \uD30C\uC77C\uACFC \uBE44\uAD50\uD558\uB294 \uC911\u2026",
   "Copied": "\uBCF5\uC0AC\uD588\uC2B5\uB2C8\uB2E4",
   "Copy": "\uBCF5\uC0AC",
   "Diff\u2026": "\uBCC0\uACBD \uB0B4\uC5ED\u2026",
@@ -6457,6 +6458,7 @@ var KO = {
   "Nothing found: every reference lands in its table, every picture and script the mod's images name is there.": "\uCC3E\uC740 \uAC83 \uC5C6\uC74C: \uBAA8\uB4E0 \uCC38\uC870\uAC00 \uD574\uB2F9 \uD45C \uC548\uC5D0 \uC788\uACE0, \uBAA8\uB4DC\uC758 \uC774\uBBF8\uC9C0\uAC00 \uAC00\uB9AC\uD0A4\uB294 \uADF8\uB9BC\uACFC \uC2A4\uD06C\uB9BD\uD2B8\uAC00 \uBAA8\uB450 \uC788\uC2B5\uB2C8\uB2E4.",
   "Nothing of an .exe is run; its archive is read.": ".exe\uB294 \uC2E4\uD589\uD558\uC9C0 \uC54A\uACE0 \uADF8 \uC548\uC758 \uC544\uCE74\uC774\uBE0C\uB9CC \uC77D\uC2B5\uB2C8\uB2E4.",
   "Nothing points at this entry.": "\uC774 \uD56D\uBAA9\uC744 \uAC00\uB9AC\uD0A4\uB294 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "Nothing was handed over.": "\uB118\uACA8\uBC1B\uC740 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "Open a Mod\u2026": "\uBAA8\uB4DC \uC5F4\uAE30\u2026",
   "Opened in {s} s. {found}": "{s}\uCD08 \uB9CC\uC5D0 \uC5F4\uC5C8\uC2B5\uB2C8\uB2E4. {found}",
   "Opening {name}\u2026": "{name|\uC744} \uC5EC\uB294 \uC911\u2026",
@@ -6483,6 +6485,7 @@ var KO = {
   "Tables": "\uD45C",
   "Technologies": "\uAE30\uC220",
   "Text": "\uD14D\uC2A4\uD2B8",
+  "The archive inside {file} could not be opened: {error}": "{file} \uC548\uC758 \uC544\uCE74\uC774\uBE0C\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The browser did not open the play page's tab. Allow pop-ups for this page and press Play again.": "\uBE0C\uB77C\uC6B0\uC800\uAC00 \uD50C\uB808\uC774 \uD398\uC774\uC9C0 \uD0ED\uC744 \uC5F4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uC774 \uD398\uC774\uC9C0\uC758 \uD31D\uC5C5\uC744 \uD5C8\uC6A9\uD558\uACE0 \uB2E4\uC2DC \uD50C\uB808\uC774\uB97C \uB204\uB974\uC138\uC694.",
   "The code editor could not be loaded: {error}": "\uCF54\uB4DC \uD3B8\uC9D1\uAE30\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The editor is not drawing from this mod now.": "\uD3B8\uC9D1\uAE30\uB294 \uC9C0\uAE08 \uC774 \uBAA8\uB4DC\uC758 \uD30C\uC77C\uB85C \uADF8\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
@@ -6529,8 +6532,13 @@ var KO = {
   "{field} holds a whole number from 0 to {max} ({type}).": "{field}\uC5D0\uB294 0\uBD80\uD130 {max}\uAE4C\uC9C0\uC758 \uC815\uC218\uAC00 \uB4E4\uC5B4\uAC11\uB2C8\uB2E4 ({type}).",
   "{field} is in parts: {parts}.": "{field}\uB294 \uC5EC\uB7EC \uBD80\uBD84\uC73C\uB85C \uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4: {parts}.",
   "{file} cannot be shown as text: {why}": "{file|\uC744} \uD14D\uC2A4\uD2B8\uB85C \uBCF4\uC77C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: {why}",
+  "{file} could not be opened as an archive: {error}": "{file}|\uC744 \uC544\uCE74\uC774\uBE0C\uB85C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "{file} entry {n} changed.": "{file} \uD56D\uBAA9 {n|\uC744} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
+  "{file} gave no {member}.": "{file}\uC5D0\uC11C {member}|\uC774 \uB098\uC624\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
+  "{file} is not a mod: not an MPQ, a self-executing exe or a zip.": "{file}|\uC740 \uBAA8\uB4DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: MPQ\uB3C4, \uC790\uB3D9 \uC2E4\uD589 exe\uB3C4, zip\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
+  "{file} is not a zip.": "{file}|\uC740 zip\uC774 \uC544\uB2D9\uB2C8\uB2E4.",
   "{file}, line {line}": "{file}, {line}\uBC88 \uC904",
+  "{file}: {error}": "{file}: {error}",
   "{file}: {lines} lines, {bytes} bytes as assembled.": "{file}: {lines}\uC904, \uC5B4\uC148\uBE14\uD558\uBA74 {bytes}\uBC14\uC774\uD2B8.",
   "{label}{hash}: the unit palette, the settings dialogs' defaults and the units drawn follow the mod's files as you edit them.": "{label}{hash}: \uC720\uB2DB \uD314\uB808\uD2B8, \uC124\uC815 \uB300\uD654 \uC0C1\uC790\uC758 \uAE30\uBCF8\uAC12, \uADF8\uB824\uC9C0\uB294 \uC720\uB2DB\uC774 \uD3B8\uC9D1\uD558\uB294 \uB300\uB85C \uBAA8\uB4DC\uC758 \uD30C\uC77C\uC744 \uB530\uB985\uB2C8\uB2E4.",
   "{message}. The script keeps its last text that assembled.": "{message}. \uC2A4\uD06C\uB9BD\uD2B8\uB294 \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC5B4\uC148\uBE14\uB41C \uD14D\uC2A4\uD2B8\uB97C \uC720\uC9C0\uD569\uB2C8\uB2E4.",
@@ -10556,16 +10564,29 @@ function probeNames(archive) {
 }
 var leaf = (p) => p.split("/").pop();
 async function openPieces(pieces, name, base = null) {
-  if (!pieces.length) throw new OpenError("Nothing was handed over.");
+  if (!pieces.length) throw new OpenError(t2("Nothing was handed over."));
   const textFolder2 = await findTextFolder(pieces);
   if (textFolder2) return openTextFolder(textFolder2.root, textFolder2.manifest, pieces, name, base);
   const single = pieces.length === 1 && !pieces[0].path.includes("/");
+  if (single && /\.zip$/i.test(pieces[0].path)) {
+    const bytes = await pieces[0].read();
+    if (!isZip(bytes)) throw new OpenError(t2("{file} is not a zip.", { file: pieces[0].path }));
+    let members;
+    try {
+      members = readZip(bytes);
+    } catch (e) {
+      throw new OpenError(t2("{file}: {error}", { file: pieces[0].path, error: e.message }));
+    }
+    const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
+    const folder = await findTextFolder(inside);
+    if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
+  }
   const lower = pieces[0].path.toLowerCase();
   const kind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") ? "exe" : "archive";
   if (single) {
     const bytes = await pieces[0].read();
-    if (kind === "zip" && !isZip(bytes)) throw new OpenError(`${pieces[0].path} is not a zip.`);
-    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(`${pieces[0].path} is not a mod: not an MPQ, a self-executing exe or a zip.`);
+    if (kind === "zip" && !isZip(bytes)) throw new OpenError(t2("{file} is not a zip.", { file: pieces[0].path }));
+    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(t2("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: pieces[0].path }));
     const piece = { path: pieces[0].path, size: bytes.length, read: async () => bytes };
     return fromPieces(kind, name.replace(/\.(mpq|exe|zip)$/i, ""), [piece]);
   }
@@ -10606,7 +10627,7 @@ async function fromPieces(kind, name, pieces) {
         try {
           members = readZip(bytes);
         } catch (e) {
-          throw new OpenError(`${p.path}: ${e.message}`);
+          throw new OpenError(t2("{file}: {error}", { file: p.path, error: e.message }));
         }
         const prefix = list.length === 1 && depth === 0 ? "" : p.path.replace(/\.zip$/i, "") + "/";
         await take(members.map((m) => ({ path: `${prefix}${m.path}`, size: m.size, read: m.read })), depth + 1);
@@ -10614,7 +10635,7 @@ async function fromPieces(kind, name, pieces) {
         try {
           archives.push({ label: p.path, archive: Archive.open(bytes) });
         } catch (e) {
-          throw new OpenError(`${p.path} could not be opened as an archive: ${e.message}`);
+          throw new OpenError(t2("{file} could not be opened as an archive: {error}", { file: p.path, error: e.message }));
         }
       } else if (l.endsWith(".exe")) {
         const found = exeArchive(bytes);
@@ -10625,7 +10646,7 @@ async function fromPieces(kind, name, pieces) {
         try {
           archives.push({ label: p.path, archive: Archive.open(found.archive) });
         } catch (e) {
-          throw new OpenError(`The archive inside ${p.path} could not be opened: ${e.message}`);
+          throw new OpenError(t2("The archive inside {file} could not be opened: {error}", { file: p.path, error: e.message }));
         }
         source.exes.push({ file: p.path, kind: found.kind, at: found.at, plugins: found.plugins });
       } else loose.push(p);
@@ -10721,7 +10742,7 @@ async function openTextFolder(root, manifest, pieces, name, base) {
     for (const member of of.form === "ai" ? of.members : [of.members[0]]) {
       const read = async () => {
         const got = (await pack(p)).find((m) => gameName(m.member) === gameName(member));
-        if (!got) throw new OpenError(`${p.path} gave no ${member}`);
+        if (!got) throw new OpenError(t2("{file} gave no {member}.", { file: p.path, member }));
         return got.data;
       };
       source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path });
@@ -11375,6 +11396,7 @@ function activate(api) {
   return () => editor.close(true);
 }
 var COPY_HOLDS = /^(arr\/[^/]+$|scripts\/iscript\.bin$|unit\/|tileset\/|game\/|rez\/unitnames\.tbl$)/;
+var SMALL = /^(arr\/[^/]+$|scripts\/iscript\.bin$|tileset\/stat_txt\.tbl$|rez\/unitnames\.tbl$|unit\/manifest\.json$)/;
 var ModEditor = class {
   api;
   panel = null;
@@ -11392,6 +11414,8 @@ var ModEditor = class {
   before = null;
   reader = null;
   quiet = 0;
+  /** The game's small files (tables, string tables, iscript, the unit manifest) as read before the mod was laid over them. */
+  baseCache = /* @__PURE__ */ new Map();
   baseManifest = null;
   update = { timer: 0, running: false, again: false };
   playTab = null;
@@ -11580,11 +11604,12 @@ var ModEditor = class {
     this.ensurePanel();
     if (this.session && !await this.api.ui.confirm(t2("Close {name} and open another mod? Changes not saved are lost.", { name: this.session.source.name }))) return;
     this.opening = true;
-    this.closeMod(false);
+    this.closeMod(false, false);
     this.say(t2("Opening {name}\u2026", { name }));
     try {
       const t0 = performance.now();
       const base = this.api.gameData.source()?.kind === "none" ? null : (member) => this.baseRead(member);
+      this.baseCache.clear();
       if (base) await this.readBaseManifest();
       const source = await openPieces(pieces, name, base);
       const session = await ModSession.open(source, { base, baseHas: base ? (m) => this.baseHas(m) : void 0 });
@@ -11595,6 +11620,11 @@ var ModEditor = class {
       this.said = t2("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1e3).toFixed(1), found: this.found });
       this.api.ui.status(this.found);
       this.draw();
+      if (base) {
+        this.say(t2("Comparing the mod's files with the game's\u2026"));
+        await session.changedMembers();
+        this.said = t2("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1e3).toFixed(1), found: this.found });
+      }
       await this.attach(true);
     } catch (e) {
       this.session = null;
@@ -11604,17 +11634,18 @@ var ModEditor = class {
       this.opening = false;
     }
   }
-  closeMod(redraw = true) {
+  /** `restore`: put the editor back on the data set it drew from before (not when another mod is about to replace it). */
+  closeMod(redraw = true, restore = true) {
     this.scripts?.dispose();
     this.tables = null;
     this.strings = null;
     this.scripts = null;
-    const was = this.attached;
+    const ours = !!this.attached && this.isOurs();
     this.session = null;
     this.attached = null;
     this.reader = null;
     clearTimeout(this.update.timer);
-    if (was && this.isOurs()) void this.api.gameData.select(this.before ?? "default").catch(() => void 0);
+    if (ours && restore) void (async () => this.api.gameData.select(this.before ?? (await this.api.gameData.profiles())[0]?.id ?? "starcraft"))().catch(() => void 0);
     this.said = "";
     if (redraw) this.draw();
   }
@@ -11627,9 +11658,12 @@ var ModEditor = class {
   async baseRead(member) {
     const stored = storedPathOf(member);
     if (!COPY_HOLDS.test(stored)) return null;
+    if (this.baseCache.has(stored)) return this.baseCache.get(stored);
     this.quiet++;
     try {
-      return await this.api.gameData.read(stored);
+      const bytes = await this.api.gameData.read(stored);
+      if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
+      return bytes;
     } finally {
       this.quiet--;
     }
