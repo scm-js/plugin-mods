@@ -5,7 +5,7 @@
  * No DOM: the tests drive it in Node, and the panel only draws it.
  */
 import {
-  DAT_SCHEMAS, DAT_TABLES, aiNames, aiscriptFromText, aiscriptToText, checkMod, datTableOf, decodeDat, decodeTblFile, diffMods, encodeDat, encodeTblFile,
+  DAT_SCHEMAS, DAT_TABLES, aiNames, decodeLoFile, encodeLoFile, loFromText, loToText, aiscriptFromText, aiscriptToText, checkMod, datTableOf, decodeDat, decodeTblFile, diffMods, encodeDat, encodeTblFile,
   entryText, fieldType, gameName, iscriptFromText, iscriptToText, loadModData, namesOf, placeOf, readIscriptHeaders, storedRange,
   type AiNames, type DatField, type DatFile, type DatTableName, type DiffSide, type ModChange, type ModData, type ModFinding, type TblFile,
 } from "@scm-js/core";
@@ -31,9 +31,9 @@ const STRING_KEYS: Record<string, keyof ModData["strings"]> = {
 };
 
 export interface ScriptDoc {
-  /** `iscript:<member>` or `ai`. */
+  /** `iscript:<member>`, `ai`, or `overlay:<member>`. */
   id: string;
-  kind: "iscript" | "ai";
+  kind: "iscript" | "ai" | "overlay";
   /** Its file in a mod folder (`iscript/iscript_terran.txt`, `ai/aiscript.txt`). */
   label: string;
   /** The members it is: one iscript, or aiscript.bin (and bwscript.bin). */
@@ -105,9 +105,9 @@ export class ModSession {
     return () => this.listeners.delete(listener);
   }
 
-  private changed(kind: "table" | "strings" | "script") {
+  private changed(kind: "table" | "strings" | "script" | "file") {
     this.revision++;
-    if (kind !== "script") this.data.names = namesOf(this.data.tables, this.data.strings);
+    if (kind === "table" || kind === "strings") this.data.names = namesOf(this.data.tables, this.data.strings);
     if (kind === "table") this.refs = new RefIndex(this.data.tables);
     for (const l of this.listeners) l();
   }
@@ -310,6 +310,7 @@ export class ModSession {
     const ai = ["scripts\\aiscript.bin", "scripts\\bwscript.bin"].filter((m) => this.has(m));
     if (ai.length) out.push({ id: "ai", kind: "ai", label: "ai/aiscript.txt", members: ai.map((m) => this.nameOf(m)), fromGame: false });
     else if (this.base && (await this.base("scripts\\aiscript.bin"))) out.push({ id: "ai", kind: "ai", label: "ai/aiscript.txt", members: ["scripts\\aiscript.bin", "scripts\\bwscript.bin"], fromGame: true });
+    for (const m of this.members().filter((k) => /\.lo[a-z]$/.test(k))) out.push({ id: `overlay:${m}`, kind: "overlay", label: placeOf(this.nameOf(m)).file, members: [this.nameOf(m)], fromGame: false });
     return out;
   }
 
@@ -329,6 +330,10 @@ export class ModSession {
         const bytes = await this.readOver(doc.members[0]);
         if (!bytes) throw new Error(`${doc.members[0]} is not there`);
         state.text = iscriptToText(bytes, { headerComment: (sid) => this.iscriptComment(sid) });
+      } else if (doc.kind === "overlay") {
+        const bytes = await this.readOver(doc.members[0]);
+        if (!bytes) throw new Error(`${doc.members[0]} is not there`);
+        state.text = loToText(decodeLoFile(bytes));
       } else {
         const [ai, bw] = await Promise.all(doc.members.map((m) => this.readOver(m)));
         if (!ai) throw new Error("scripts\\aiscript.bin is not there");
@@ -366,6 +371,7 @@ export class ModSession {
     state.text = text;
     try {
       if (doc.kind === "iscript") this.putScript(doc.members[0], iscriptFromText(text));
+      else if (doc.kind === "overlay") this.putScript(doc.members[0], encodeLoFile(loFromText(text)));
       else {
         const out = aiscriptFromText(text, { names: state.names });
         this.putScript(doc.members[0], out.aiscript);
@@ -377,7 +383,8 @@ export class ModSession {
       }
       state.error = null;
     } catch (e) {
-      const line = (e as { line?: number }).line ?? 0;
+      const said = (e as Error).message ?? String(e);
+      const line = (e as { line?: number }).line ?? Number(/^line (\d+): /.exec(said)?.[1] ?? 0);
       state.error = { line, message: (e as Error).message.replace(/^line \d+: /, "") };
     }
     this.changed("script");
@@ -392,6 +399,29 @@ export class ModSession {
     if (!this.source.files.has(k)) this.added.set(k, member);
     const doc = this.scripts.find((s) => s.members.some((m) => gameName(m) === k));
     if (doc) doc.fromGame = false;
+  }
+
+  /**
+   * A member's bytes replaced as a whole (a picture imported, a sound replaced). A member the mod did not have becomes
+   * its own. Bytes equal to what came leave the member untouched.
+   */
+  setMember(member: string, bytes: Uint8Array) {
+    const k = gameName(member);
+    const was = this.source.files.get(k);
+    this.digests.delete(k);
+    this.baseSame.delete(k);
+    this.overrides.set(k, bytes);
+    if (!was) this.added.set(k, member);
+    this.changed("file");
+  }
+
+  /** An overlay opened as text (the game's, for an image whose overlay the mod does not have) becomes a script to edit. */
+  addOverlay(member: string): ScriptDoc {
+    const k = gameName(member);
+    const id = `overlay:${k}`;
+    let doc = this.script(id);
+    if (!doc) { doc = { id, kind: "overlay", label: placeOf(member).file, members: [member], fromGame: !this.has(k) }; this.scripts.push(doc); }
+    return doc;
   }
 
   /** Scripts whose text does not assemble now (the member keeps its last good bytes). */

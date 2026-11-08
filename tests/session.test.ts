@@ -104,10 +104,10 @@ describe("what the editor is handed", () => {
     const { reader } = attachReader({ members: () => ["arr\\units.datex", "arr\\flingy.dat", "rez\\unitnames.tbl"], read: async () => new Uint8Array(1), baseManifest: { datex: ["flingy"], optional: [] } });
     expect(JSON.parse(new TextDecoder().decode((await reader("unit/manifest.json"))!))).toEqual({ datex: ["units"], optional: ["rez/unitnames.tbl"] });
     expect(await reader("arr/units.datex")).not.toBeNull();
-    let off = true;
-    const quiet = attachReader({ members: () => ["arr\\units.dat"], read: async () => new Uint8Array(1), baseManifest: null }, () => off);
+    let off = "arr/units.dat";
+    const quiet = attachReader({ members: () => ["arr\\units.dat"], read: async () => new Uint8Array(1), baseManifest: null }, (path) => path === off);
     expect(await quiet.reader("arr/units.dat")).toBeNull();
-    off = false;
+    off = "";
     expect(await quiet.reader("arr/units.dat")).not.toBeNull();
   });
 

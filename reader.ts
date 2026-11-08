@@ -58,15 +58,15 @@ export interface ReaderFiles {
 }
 
 /**
- * The function to hand `api.gameData.attach`. `off()` true answers nothing (every file from the data set underneath):
- * how the plugin reads the game's own files while its reader is attached.
+ * The function to hand `api.gameData.attach`. `off(path)` true answers nothing for that path (the file from the data
+ * set underneath): how the plugin reads the game's own file at a path while its reader is attached.
  */
-export function attachReader(files: ReaderFiles, off: () => boolean = () => false) {
+export function attachReader(files: ReaderFiles, off: (path: string) => boolean = () => false) {
   let index: Map<string, string> | null = null;
   let manifest: Uint8Array | null = null;
   const reader = async (path: string): Promise<Uint8Array | null> => {
-    if (off()) return null;
     const clean = path.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
+    if (off(clean)) return null;
     if (!index) {
       index = new Map();
       for (const m of files.members()) index.set(storedPathOf(m), gameName(m));

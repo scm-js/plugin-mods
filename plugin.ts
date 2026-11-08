@@ -22,7 +22,10 @@ import { DEFAULT_DIST, DIST_STORAGE_KEY } from "./monaco";
 import { PlayTab, playAddress, playMessage, playPageThere } from "./play";
 import { attachReader, storedPathOf, type UnitManifest } from "./reader";
 import { changedZip, currentMembers, textFolder, writeMpq, writeZip } from "./save";
+import { Look } from "./look";
+import { PicturesView } from "./picturesView";
 import { ScriptsView } from "./scriptsView";
+import { SoundsView } from "./soundsView";
 import { ModSession } from "./session";
 import { OpenError, openPieces, type Piece } from "./source";
 import { StringsView } from "./stringsView";
@@ -51,7 +54,7 @@ const COPY_HOLDS = /^(arr\/[^/]+$|scripts\/iscript\.bin$|unit\/|tileset\/|game\/
 /** The game's files the plugin keeps once read: small, and read again by every diff, check and string table. */
 const SMALL = /^(arr\/[^/]+$|scripts\/iscript\.bin$|tileset\/stat_txt\.tbl$|rez\/unitnames\.tbl$|unit\/manifest\.json$)/;
 
-type Tab = "tables" | "strings" | "scripts";
+type Tab = "tables" | "strings" | "pictures" | "sounds" | "scripts" | "overlays";
 
 class ModEditor {
   private readonly api: PluginApi;
@@ -63,13 +66,19 @@ class ModEditor {
   private tables: TablesView | null = null;
   private strings: StringsView | null = null;
   private scripts: ScriptsView | null = null;
+  private pictures: PicturesView | null = null;
+  private sounds: SoundsView | null = null;
+  private overlays: ScriptsView | null = null;
+  /** The palette and team colour pictures are drawn with, shared by the Pictures tab and the previews. */
+  private look: Look | null = null;
   private statusEl: HTMLElement | null = null;
   private said = "";
   /** Draw-from state: the profile handed to `attach`, the hash it carries, and the set in use before. */
   private attached: { profile: GameDataProfile; hash: string | null; label: string } | null = null;
   private before: string | null = null;
   private reader: ReturnType<typeof attachReader> | null = null;
-  private quiet = 0;
+  /** Paths the plugin is reading from the copy underneath at this moment: the reader answers nothing for them. */
+  private readonly quiet = new Map<string, number>();
   /** The game's small files (tables, string tables, iscript, the unit manifest) as read before the mod was laid over them. */
   private readonly baseCache = new Map<string, Uint8Array | null>();
   private baseManifest: (UnitManifest & { grps?: string[]; overlays?: string[] }) | null = null;
@@ -95,7 +104,7 @@ class ModEditor {
     this.panel = this.api.ui.panel({
       title: t("Mod Editor"),
       dock: "bottom",
-      height: 340,
+      height: 380,
       mount: (body) => { this.body = h("div", { className: "mx" }); body.append(this.body); this.draw(); },
       onClose: () => { this.panel = null; this.body = null; },
     });
@@ -104,9 +113,14 @@ class ModEditor {
   relabel() {
     this.panel?.setTitle(t("Mod Editor"));
     if (this.session) this.found = foundLine(this.session.source);
-    this.tables = null; this.strings = null;
-    this.scripts?.dispose(); this.scripts = null;
+    this.dropViews();
     this.draw();
+  }
+
+  /** Every tab's view goes (a language change, another mod); they are made again when shown. */
+  private dropViews() {
+    this.scripts?.dispose(); this.overlays?.dispose(); this.sounds?.dispose();
+    this.tables = null; this.strings = null; this.scripts = null; this.pictures = null; this.sounds = null; this.overlays = null;
   }
 
   private draw() {
@@ -118,7 +132,7 @@ class ModEditor {
     const s = this.session;
     const tabs = h("div", { className: "mx-tabs" });
     const tabButton = (id: Tab, label: string) => h("button", { className: `mx-tab${this.tab === id ? " on" : ""}`, type: "button", dataset: { tab: id }, onclick: () => { this.tab = id; this.draw(); } }, label);
-    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("scripts", t("Scripts")));
+    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("pictures", t("Pictures")), tabButton("sounds", t("Sounds")), tabButton("scripts", t("Scripts")), tabButton("overlays", t("Overlays")));
     const bar = h("div", { className: "mx-bar" },
       h("span", { className: "mx-grow", title: this.found }, h("b", null, s.source.name), " ", h("span", { className: "mx-dim" }, this.found.replace(/^[^,]*, /, ""))),
       button(t("Open…"), () => { this.closeMod(); }, { title: t("Close this mod and open another") }),
@@ -138,18 +152,26 @@ class ModEditor {
 
   private context(): ViewContext {
     return {
+      api: this.api,
       session: this.session!,
       say: (text) => this.say(text),
       go: (table, id, field) => this.go(table, id, field),
       goScript: (id) => { this.tab = "scripts"; this.draw(); void this.scripts!.showIscript(id); },
       goString: (member, entry) => { this.tab = "strings"; this.draw(); void this.strings!.show(member, entry); },
+      gameGrps: () => this.baseManifest?.grps ?? [],
+      goImage: (id) => { this.tab = "pictures"; this.draw(); void this.pictures!.showImage(id); },
     };
   }
 
   private view(tab: Tab): HTMLElement {
     if (tab === "tables") { this.tables ??= new TablesView(this.context()); this.tables.refresh(); return this.tables.el; }
     if (tab === "strings") { this.strings ??= new StringsView(this.context()); this.strings.refresh(); return this.strings.el; }
-    this.scripts ??= new ScriptsView(this.context(), this.api.storage.get<string>(DIST_STORAGE_KEY, DEFAULT_DIST));
+    this.look ??= new Look(this.session!);
+    if (tab === "pictures") { this.pictures ??= new PicturesView(this.context(), this.look); this.pictures.refresh(); return this.pictures.el; }
+    if (tab === "sounds") { this.sounds ??= new SoundsView(this.context()); this.sounds.refresh(); return this.sounds.el; }
+    const dist = this.api.storage.get<string>(DIST_STORAGE_KEY, DEFAULT_DIST);
+    if (tab === "overlays") { this.overlays ??= new ScriptsView(this.context(), dist, ["overlay"]); this.overlays.refresh(); return this.overlays.el; }
+    this.scripts ??= new ScriptsView(this.context(), dist, ["iscript", "ai"], this.look);
     this.scripts.refresh();
     return this.scripts.el;
   }
@@ -256,8 +278,8 @@ class ModEditor {
 
   /** `restore`: put the editor back on the data set it drew from before (not when another mod is about to replace it). */
   private closeMod(redraw = true, restore = true) {
-    this.scripts?.dispose();
-    this.tables = null; this.strings = null; this.scripts = null;
+    this.dropViews();
+    this.look = null;
     const ours = !!this.attached && this.isOurs();
     this.session = null;
     this.attached = null;
@@ -281,15 +303,15 @@ class ModEditor {
     const stored = storedPathOf(member);
     if (!COPY_HOLDS.test(stored)) return null;
     if (this.baseCache.has(stored)) return this.baseCache.get(stored)!;
-    // While the mod is attached every read goes through it first: it says nothing for a moment, so the copy answers.
-    // An editor read in that moment would get the copy's file too, so the plugin reads the game's files it needs before
-    // it attaches (the comparisons, the small files kept here) and only an edited member's comparison comes later.
-    this.quiet++;
+    // While the mod is attached every read goes through it first: it says nothing for this path for a moment, so the copy
+    // answers. An editor read of the same path in that moment would get the copy's file too, so the plugin reads the
+    // game's files it compares before it attaches (and keeps the small ones here).
+    this.quiet.set(stored, (this.quiet.get(stored) ?? 0) + 1);
     try {
       const bytes = await this.api.gameData.read(stored);
       if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
       return bytes;
-    } finally { this.quiet--; }
+    } finally { const n = this.quiet.get(stored)! - 1; if (n) this.quiet.set(stored, n); else this.quiet.delete(stored); }
   }
 
   private async readBaseManifest() {
@@ -333,7 +355,7 @@ class ModEditor {
     if (first) {
       const now = this.api.gameData.source() as { kind: string; profile: GameDataProfile } | null;
       this.before = now && now.kind !== "reader" ? now.profile.id : this.before;
-      this.reader = attachReader({ members: () => session.members(), read: (m) => session.read(m), baseManifest: this.baseManifest }, () => this.quiet > 0);
+      this.reader = attachReader({ members: () => session.members(), read: (m) => session.read(m), baseManifest: this.baseManifest }, (path) => this.quiet.has(path));
     }
     const profile = this.profile();
     const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
@@ -368,6 +390,9 @@ class ModEditor {
   private edited() {
     if (this.tab === "tables") this.tables?.refresh();
     else if (this.tab === "strings") this.strings?.refresh();
+    else if (this.tab === "pictures") this.pictures?.refresh();
+    else if (this.tab === "sounds") this.sounds?.refresh();
+    else if (this.tab === "overlays") this.overlays?.refresh();
     else this.scripts?.refresh();
     clearTimeout(this.update.timer);
     this.update.timer = window.setTimeout(() => void this.redraw(), 400);

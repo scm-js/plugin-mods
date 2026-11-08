@@ -19,6 +19,19 @@ one line what it found.
   field's width; hit points in whole points, supply in units, flags in hex) before it is stored.
 - **Strings** — the mod's string tables (and the game's names, when the mod has none of its own), a line an entry as
   PyTBL writes them: `<0>` between a name's parts, `<NN>` for a control character. Double-click to change.
+- **Pictures** — every GRP the mod has, and the game's, with the images that draw each. The chosen one is drawn frame
+  by frame, as a sheet, or animated by an image's script, in a tileset's palette (jungle unless you choose another)
+  with a team colour from `tunit.pcx`. **Import PNG…** takes a sheet (every frame) or a picture one frame in size (the
+  frame shown), and lists the colours that are not in the palette, with what each becomes, before it is used.
+  **Export PNG** writes the sheet, which imports back unchanged.
+- **Sounds** — the sound table's rows with the files they play. Play a file; replace it with a dropped or chosen sound
+  (a WAV, or anything the browser plays), converted to the game's 22050 Hz, 16-bit, mono unless it is one already; or
+  record one from the microphone.
+- **Overlays** — each `.lo?` file as PyLO text in the code editor, assembled as you type, an error on its line.
+- **The animation preview** (Pictures ▸ Animation, and beside the Scripts tab, following the script at the cursor)
+  plays an image's animation from the mod's iscript as it is now: frames, waits, jumps, calls, position and facing.
+  Sounds, attacks and orders are skipped, overlays are not drawn, jumps that read the game's state take the "no" way,
+  and it stops at anything else, saying which — a running game (Play) shows the rest.
 - **Scripts** — each animation script as PyICE text and the AI scripts as PyAI text, in the code editor TrigScript
   uses: coloured, with completion of the commands and of image, sprite, sound, weapon and unit ids by name, and go to
   a label. Every change is assembled a moment later; an error is marked on its line, and the script keeps its last

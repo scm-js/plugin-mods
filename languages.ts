@@ -10,6 +10,7 @@ import type { MonacoApi } from "./monaco";
 
 export const PYICE = "pyice";
 export const PYAI = "pyai";
+export const PYLO = "pylo";
 
 /** An id with what it is called, for completion. */
 export interface Named { id: number; label: string }
@@ -90,6 +91,21 @@ export function aiGrammar(): Monaco.languages.IMonarchLanguage {
   } as Monaco.languages.IMonarchLanguage;
 }
 
+/** The Monarch grammar of PyLO text: `Frame:` and `(x, y)` pairs. */
+export function loGrammar(): Monaco.languages.IMonarchLanguage {
+  return {
+    defaultToken: "",
+    tokenizer: {
+      root: [
+        [/#.*$/, "comment"],
+        [/^\s*Frame:/, "keyword"],
+        [/-?\d+\b/, "number"],
+        [/[(),]/, "delimiter"],
+      ],
+    },
+  } as Monaco.languages.IMonarchLanguage;
+}
+
 /** Labels a model defines: `Name:` at a line's start (PyICE), `--name--` on a line of its own (PyAI). */
 export function labelsOf(text: string, language: string): { name: string; line: number }[] {
   const out: { name: string; line: number }[] = [];
@@ -131,6 +147,9 @@ export function registerLanguages(monaco: MonacoApi, names: () => ScriptNames | 
   const L = monaco.languages;
   L.register({ id: PYICE, extensions: [".iscript"], aliases: ["PyICE iscript"] });
   L.register({ id: PYAI, extensions: [".pyai"], aliases: ["PyAI script"] });
+  L.register({ id: PYLO, aliases: ["PyLO overlays"] });
+  L.setMonarchTokensProvider(PYLO, loGrammar());
+  L.setLanguageConfiguration(PYLO, { comments: { lineComment: "#" }, brackets: [["(", ")"]] });
   L.setMonarchTokensProvider(PYICE, iscriptGrammar());
   L.setMonarchTokensProvider(PYAI, aiGrammar());
   L.setLanguageConfiguration(PYICE, { comments: { lineComment: "#" } });

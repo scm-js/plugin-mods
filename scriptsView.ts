@@ -9,7 +9,10 @@ import type * as Monaco from "monaco-editor";
 import { clear, h } from "./dom";
 import { t } from "./i18n";
 import { num } from "./info";
-import { PYAI, PYICE, registerLanguages, type Named, type ScriptNames } from "./languages";
+import { PYAI, PYICE, PYLO, registerLanguages, type Named, type ScriptNames } from "./languages";
+import type { Look } from "./look";
+import { AnimPreview } from "./preview";
+import { ScriptIndex } from "./animate";
 import { DEFAULT_DIST, THEME, loadMonaco, type MonacoApi } from "./monaco";
 import type { ModSession, ScriptDoc } from "./session";
 import type { ViewContext } from "./tablesView";
@@ -50,23 +53,41 @@ export class ScriptsView {
   private open: ScriptDoc | null = null;
   private timer = 0;
   private readonly dist: string;
+  private readonly kinds: ScriptDoc["kind"][];
+  private readonly preview: AnimPreview | null;
+  private query = "";
+  private cursorTimer = 0;
 
-  constructor(ctx: ViewContext, dist: string = DEFAULT_DIST) {
+  /** `kinds`: the scripts this tab lists (the Scripts tab's iscript and AI, the Overlays tab's overlays). */
+  constructor(ctx: ViewContext, dist: string = DEFAULT_DIST, kinds: ScriptDoc["kind"][] = ["iscript", "ai"], look?: Look) {
     this.ctx = ctx;
     this.dist = dist;
+    this.kinds = kinds;
     current = ctx.session;
     this.list = h("div", { className: "mx-list" });
     this.host = h("div", { className: "mx-editor" });
-    this.say = h("div", { className: "mx-say mx-dim" }, t("Choose a script."));
-    this.el = h("div", { className: "mx-scripts" }, this.list, h("div", { className: "mx-col" }, this.host, this.say));
+    this.say = h("div", { className: "mx-say mx-dim" }, kinds.includes("overlay") ? t("Choose an overlay file.") : t("Choose a script."));
+    this.preview = look && kinds.includes("iscript") ? new AnimPreview(ctx.session, () => look.current()) : null;
+    const search = h("input", { type: "search", placeholder: t("Search"), style: "width: 100%", oninput: () => { this.query = search.value.toLowerCase(); this.drawList(); } });
+    const many = this.docs().length > 20;
+    this.el = h("div", { className: `mx-scripts${this.preview ? " with-preview" : ""}` },
+      h("div", { className: "mx-col" }, many ? h("div", { className: "mx-bar" }, search) : null, this.list),
+      h("div", { className: "mx-col" }, this.host, this.say),
+      this.preview ? h("div", { className: "mx-side" }, h("h4", null, t("Preview")), h("p", { className: "mx-faint" }, t("The animation of the script at the cursor, for the first image that uses it.")), this.preview.el) : null);
+    if (look) void look.load();
     this.drawList();
+  }
+
+  private docs(): ScriptDoc[] {
+    return this.ctx.session.scripts.filter((d) => this.kinds.includes(d.kind));
   }
 
   private drawList() {
     clear(this.list);
     const errors = new Set(this.ctx.session.scriptErrors().map((e) => e.doc.id));
-    if (!this.ctx.session.scripts.length) this.list.append(h("p", { className: "mx-dim", style: "padding: 6px" }, t("The mod has no animation or AI scripts.")));
-    for (const doc of this.ctx.session.scripts) {
+    const docs = this.docs();
+    if (!docs.length) this.list.append(h("p", { className: "mx-dim", style: "padding: 6px" }, this.kinds.includes("overlay") ? t("The mod has no overlay files.") : t("The mod has no animation or AI scripts.")));
+    for (const doc of docs.filter((d) => !this.query || d.label.toLowerCase().includes(this.query))) {
       this.list.append(h("div", { className: `item${doc === this.open ? " on" : ""}`, title: doc.members.join(", "), dataset: { id: doc.id }, onclick: () => void this.show(doc.id) },
         doc.label, doc.fromGame ? h("span", { className: "tag" }, t("the game's")) : null, errors.has(doc.id) ? h("span", { className: "err" }, "●") : null));
     }
@@ -93,7 +114,7 @@ export class ScriptsView {
     if (!monaco) return;
     let model = this.models.get(id);
     if (!model) {
-      model = monaco.editor.createModel(state.text, doc.kind === "ai" ? PYAI : PYICE, monaco.Uri.parse(`mods:///${doc.label}`));
+      model = monaco.editor.createModel(state.text, doc.kind === "ai" ? PYAI : doc.kind === "overlay" ? PYLO : PYICE, monaco.Uri.parse(`mods:///${doc.label}`));
       model.onDidChangeContent(() => this.changed(doc, model!));
       this.models.set(id, model);
     }
@@ -123,6 +144,7 @@ export class ScriptsView {
       registerLanguages(monaco, () => (current ? namesOf(current) : null));
       this.monaco = monaco;
       this.editor = monaco.editor.create(this.host, { model: null, theme: THEME, automaticLayout: true, minimap: { enabled: false }, fontSize: 12, tabSize: 8, insertSpaces: false, renderWhitespace: "none", scrollBeyondLastLine: false, wordBasedSuggestions: "off" });
+      this.editor.onDidChangeCursorPosition(() => { clearTimeout(this.cursorTimer); this.cursorTimer = window.setTimeout(() => this.follow(), 250); });
       return monaco;
     } catch (err) {
       this.say.className = "mx-say mx-danger";
@@ -139,8 +161,43 @@ export class ScriptsView {
       await this.ctx.session.setScriptText(doc.id, model.getValue());
       if (this.open === doc) this.mark(doc, model);
       this.drawList();
+      this.preview?.refresh();
     }, 350);
   }
+
+  /**
+   * The preview follows the cursor: the header above it names the iscript id, and the first image that plays it is
+   * shown — an image whose id is this file's (a mod with several iscript files picks the file by the id's high word).
+   */
+  private follow() {
+    const model = this.editor?.getModel();
+    const doc = this.open;
+    if (!this.preview || !model || doc?.kind !== "iscript") return;
+    const line = this.editor!.getPosition()?.lineNumber ?? 1;
+    let id = -1;
+    for (let l = line; l >= 1 && id < 0; l--) { const m = /^IsId\s+(\d+)/.exec(model.getLineContent(l)); if (m) id = Number(m[1]); }
+    if (id < 0) return;
+    void (async () => {
+      const images = this.ctx.session.table("images");
+      if (!images) return;
+      if (!this.index || this.indexAt !== this.ctx.session.revision) {
+        const files: { member: string; bytes: Uint8Array }[] = [];
+        for (const d of this.ctx.session.scripts.filter((x) => x.kind === "iscript")) { const b = await this.ctx.session.readOver(d.members[0]); if (b) files.push({ member: d.members[0], bytes: b }); }
+        this.index = new ScriptIndex(files, images.columns.iscript_id);
+        this.indexAt = this.ctx.session.revision;
+      }
+      let image = -1;
+      for (let i = 0; i < images.count && image < 0; i++) {
+        const v = images.columns.iscript_id[i] >>> 0;
+        if ((v & 0xffff) === id && this.index.find(v)?.member === doc.members[0]) image = i;
+      }
+      if (image !== this.shownImage) { this.shownImage = image; await this.preview!.show(image >= 0 ? image : null); }
+    })();
+  }
+
+  private index: ScriptIndex | null = null;
+  private indexAt = -1;
+  private shownImage = -2;
 
   /** The assembler's verdict, on the line it named and under the editor. */
   private async mark(doc: ScriptDoc, model: Monaco.editor.ITextModel) {
@@ -162,6 +219,8 @@ export class ScriptsView {
 
   dispose() {
     clearTimeout(this.timer);
+    clearTimeout(this.cursorTimer);
+    this.preview?.stop();
     this.editor?.dispose();
     for (const m of this.models.values()) m.dispose();
     this.models.clear();

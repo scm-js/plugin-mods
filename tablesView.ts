@@ -4,6 +4,7 @@
  * (the units that carry a weapon, the images that draw a GRP). A value is edited where it is shown (double-click,
  * Enter), checked against the field's type before it is stored.
  */
+import type { PluginApi } from "@scm-js/plugin-api";
 import { DAT_SCHEMAS, entryText, type DatTableName } from "@scm-js/core";
 import { clear, h } from "./dom";
 import { columnsOf, display, parse, type Column } from "./fields";
@@ -13,6 +14,7 @@ import type { RefFrom } from "./refs";
 import type { ModSession } from "./session";
 
 export interface ViewContext {
+  api: PluginApi;
   session: ModSession;
   /** Say something in the panel's status line. */
   say(text: string): void;
@@ -22,6 +24,10 @@ export interface ViewContext {
   goScript(iscriptId: number): void;
   /** Show a string table's entry (1-based, switching to the Strings tab). */
   goString(member: string, entry: number): void;
+  /** Show an image's GRP and play its animation (switching to the Pictures tab). */
+  goImage(image: number): void;
+  /** The GRPs the game's copy here has, under `unit\` (from its unit manifest). */
+  gameGrps(): readonly string[];
 }
 
 const ROW = 22;
@@ -329,6 +335,7 @@ export class TablesView {
     }
     const name = this.session.entryName(this.table, id);
     this.side.append(h("h4", null, `${tableLabel(this.table)} ${id}${name ? ` — ${name}` : ""}`));
+    if (this.table === "images") this.side.append(h("p", null, h("a", { className: "mx-link", onclick: () => this.ctx.goImage(id) }, t("Its picture and animation →"))));
     const kv = h("div", { className: "mx-kv" });
     for (const c of this.columns) {
       if (!this.session.stores(this.table, c.field, id)) continue;

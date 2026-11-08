@@ -2168,6 +2168,48 @@ var EIGHT = [0, 1, 2, 3, 4, 5, 6, 7];
 var TWELVE = [...EIGHT, 8, 9, 10, 11];
 var EIGHT_ONLY = /* @__PURE__ */ new Set([ActionType.CreateUnit, ActionType.CreateUnitWithProperties, ActionType.SetDeaths, ActionType.SetResources, ActionType.SetScore]);
 
+// ../scm-js-mods/src/formats/wav.ts
+var WAV_FORMAT = {
+  pcm: 1,
+  msAdpcm: 2,
+  float: 3,
+  alaw: 6,
+  mulaw: 7,
+  imaAdpcm: 17,
+  extensible: 65534
+};
+function parseWavHeader(bytes) {
+  if (bytes.length < 12 || tag(bytes, 0) !== "RIFF" || tag(bytes, 8) !== "WAVE") return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let fmt = null;
+  let data = null;
+  let at = 12;
+  while (at + 8 <= bytes.length) {
+    const id = tag(bytes, at);
+    const size = dv.getUint32(at + 4, true);
+    const body = at + 8;
+    if (id === "fmt " && size >= 16 && body + 16 <= bytes.length) {
+      let format2 = dv.getUint16(body, true);
+      const channels = dv.getUint16(body + 2, true);
+      const sampleRate = dv.getUint32(body + 4, true);
+      const blockAlign = dv.getUint16(body + 12, true);
+      const bitsPerSample = dv.getUint16(body + 14, true);
+      if (format2 === WAV_FORMAT.extensible && size >= 40 && body + 26 <= bytes.length) format2 = dv.getUint16(body + 24, true);
+      const extra = bytes.subarray(body + 16, Math.min(body + size, bytes.length));
+      fmt = { format: format2, channels, sampleRate, bitsPerSample, blockAlign, extra };
+    } else if (id === "data") {
+      data = { offset: body, length: Math.min(size, bytes.length - body) };
+      if (fmt) break;
+    }
+    at = body + size + (size & 1);
+  }
+  if (!fmt) return null;
+  return { ...fmt, dataLength: data?.length ?? 0, dataOffset: data?.offset ?? bytes.length };
+}
+function tag(bytes, at) {
+  return String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
+}
+
 // ../scm-js-mods/src/data/isomTables.ts
 function rows(list) {
   return list.map(([index, isomValue = 0, brush = -1, linkId = 0]) => ({ index, isomValue, linkId, brush }));
@@ -2674,6 +2716,42 @@ function framePicture(image, index) {
     }
   }
   return out;
+}
+
+// ../scm-js-mods/src/formats/dat/pcxFile.ts
+var HEADER = 128;
+function decodePcxImage(data) {
+  if (data.length < HEADER || data[0] !== 10) throw new Error("Not a PCX file");
+  const view2 = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (data[3] !== 8 || data[65] !== 1) throw new Error(`Unsupported PCX: ${data[3]} bits \xD7 ${data[65]} planes (only 8-bit, one plane)`);
+  const width = view2.getUint16(8, true) - view2.getUint16(4, true) + 1;
+  const height = view2.getUint16(10, true) - view2.getUint16(6, true) + 1;
+  const bytesPerLine = view2.getUint16(66, true);
+  if (bytesPerLine < width) throw new Error(`PCX lines are ${bytesPerLine} bytes for a ${width}-pixel width`);
+  const hasPalette = data.length >= HEADER + 769 && data[data.length - 769] === 12;
+  const end = hasPalette ? data.length - 769 : data.length;
+  const rows2 = new Uint8Array(bytesPerLine * height);
+  let at = 0;
+  for (let p = HEADER; p < end && at < rows2.length; ) {
+    let value = data[p++];
+    let run = 1;
+    if ((value & 192) === 192) {
+      run = value & 63;
+      value = data[p++];
+    }
+    for (let i2 = 0; i2 < run && at < rows2.length; i2++) rows2[at++] = value;
+  }
+  const pixels = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) pixels.set(rows2.subarray(y * bytesPerLine, y * bytesPerLine + width), y * width);
+  return {
+    width,
+    height,
+    pixels,
+    palette: hasPalette ? data.slice(data.length - 768) : null,
+    header: data.slice(0, HEADER),
+    bytesPerLine,
+    padding: bytesPerLine > width && height > 0 ? rows2[width] : 0
+  };
 }
 
 // ../scm-js-mods/src/formats/dat/loFile.ts
@@ -6156,8 +6234,8 @@ function same2(a2, b) {
 }
 
 // dom.ts
-function h(tag, props = null, ...children) {
-  const el = document.createElement(tag);
+function h(tag2, props = null, ...children) {
+  const el = document.createElement(tag2);
   if (props) {
     for (const [k, v] of Object.entries(props)) {
       if (v === void 0 || v === null || v === false) continue;
@@ -6254,6 +6332,21 @@ var STYLE = `
 .mx .mx-list .item .err { color: var(--danger, #d9534f); margin-left: 4px; }
 .mx .mx-editor { flex: 1; min-height: 0; }
 .mx .mx-say { flex: none; padding: 2px 6px; border-top: 1px solid var(--border, #2c3341); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* pictures, sounds, preview */
+.mx .mx-pictures { flex: 1; min-height: 0; display: grid; grid-template-columns: 280px minmax(0, 1fr); }
+.mx .mx-pictures > .mx-col:first-child { border-right: 1px solid var(--border, #2c3341); }
+.mx .mx-pics { border-right: none; flex: 1; min-height: 0; }
+.mx .mx-stagewrap { flex: 1; min-height: 0; overflow: auto; padding: 4px 6px; }
+.mx .mx-stage { display: inline-block; padding: 6px; border: 1px solid var(--border, #2c3341); border-radius: 4px; background-color: #1a1d24; background-image: linear-gradient(45deg, #22262f 25%, transparent 25%, transparent 75%, #22262f 75%), linear-gradient(45deg, #22262f 25%, transparent 25%, transparent 75%, #22262f 75%); background-size: 16px 16px; background-position: 0 0, 8px 8px; }
+.mx .mx-canvas { display: block; image-rendering: pixelated; }
+.mx .mx-sheet { display: inline-block; background: #1a1d24; }
+.mx .mx-scripts.with-preview { grid-template-columns: 210px minmax(0, 1fr) 300px; }
+.mx .mx-preview { display: flex; flex-direction: column; gap: 4px; }
+.mx .mx-preview .mx-bar { padding: 0; }
+.mx .mx-preview-line, .mx .mx-preview-notes { white-space: normal; font-size: 11px; }
+.mx-dlg .mx-swatch, .mx .mx-swatch { display: inline-block; width: 12px; height: 12px; border: 1px solid #000; vertical-align: -2px; }
+.mx-dlg .mx-lost { max-height: 260px; overflow: auto; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; }
 
 /* dialogs */
 .mx-dlg { display: flex; flex-direction: column; gap: 6px; min-height: 0; height: 100%; font-size: 12px; }
@@ -6404,17 +6497,27 @@ function foundLine(source) {
 
 // ko.ts
 var KO = {
+  " (mirrored)": " (\uC88C\uC6B0 \uBC18\uC804)",
   " ({n} unit types, the game has {standard})": " (\uC720\uB2DB \uC885\uB958 {n}\uAC1C, \uAC8C\uC784\uC740 {standard}\uAC1C)",
   "(the game's)": "(\uAC8C\uC784\uC758 \uAC83)",
+  ", converted to 22050 Hz, 16-bit, mono": ", 22050 Hz \xB7 16\uBE44\uD2B8 \xB7 \uBAA8\uB178\uB85C \uBCC0\uD658",
   "; {k} kept as bytes (mod.json says why)": "; {k}\uAC1C\uB294 \uBC14\uC774\uD2B8 \uADF8\uB300\uB85C \uB460 (\uC774\uC720\uB294 mod.json\uC5D0)",
+  "; {n} rows play it": "; \uC774 \uD30C\uC77C\uC744 \uC7AC\uC0DD\uD558\uB294 \uD589 {n}\uAC1C",
+  "A WAV, or any sound the browser plays; drop one here too": "WAV \uB610\uB294 \uBE0C\uB77C\uC6B0\uC800\uAC00 \uC7AC\uC0DD\uD558\uB294 \uBAA8\uB4E0 \uC18C\uB9AC. \uC5EC\uAE30\uC5D0 \uB193\uC544\uB3C4 \uB429\uB2C8\uB2E4",
   "A number is needed.": "\uC22B\uC790\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.",
   "A number of 0 or more is needed.": "0 \uC774\uC0C1\uC758 \uC22B\uC790\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.",
+  "A replacement is converted to 22050 Hz, 16-bit, mono (the game's own) unless it is one already.": "\uBC14\uAFB8\uB294 \uC18C\uB9AC\uB294 \uC774\uBBF8 \uADF8 \uD615\uC2DD\uC774 \uC544\uB2C8\uBA74 22050 Hz \xB7 16\uBE44\uD2B8 \xB7 \uBAA8\uB178(\uAC8C\uC784\uC758 \uD615\uC2DD)\uB85C \uBCC0\uD658\uB429\uB2C8\uB2E4.",
+  "A sheet replaces every frame; a picture one frame in size replaces the frame shown": "\uC2DC\uD2B8\uB294 \uBAA8\uB4E0 \uD504\uB808\uC784\uC744, \uD504\uB808\uC784 \uD558\uB098 \uD06C\uAE30\uC758 \uADF8\uB9BC\uC740 \uBCF4\uC774\uB294 \uD504\uB808\uC784\uC744 \uBC14\uAFC9\uB2C8\uB2E4",
   "A whole number is needed (0x\u2026 for hex).": "\uC815\uC218\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4 (16\uC9C4\uC218\uB294 0x\u2026).",
   "Against the game": "\uAC8C\uC784\uACFC \uBE44\uAD50",
   "Against the mod as it was opened": "\uC5F4\uC5C8\uC744 \uB54C\uC758 \uBAA8\uB4DC\uC640 \uBE44\uAD50",
+  "Animation": "\uC560\uB2C8\uBA54\uC774\uC158",
   "Another data set was chosen, so the editor no longer draws from {name}. Edit anything to draw from it again.": "\uB2E4\uB978 \uB370\uC774\uD130 \uC138\uD2B8\uAC00 \uC120\uD0DD\uB418\uC5B4 \uD3B8\uC9D1\uAE30\uAC00 \uB354 \uC774\uC0C1 {name}\uC758 \uD30C\uC77C\uB85C \uADF8\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uBB34\uC5C7\uC774\uB4E0 \uACE0\uCE58\uBA74 \uB2E4\uC2DC \uADF8 \uD30C\uC77C\uB85C \uADF8\uB9BD\uB2C8\uB2E4.",
   "Assembling\u2026": "\uC5B4\uC148\uBE14\uD558\uB294 \uC911\u2026",
+  "Blue": "\uD30C\uB791",
+  "Brown": "\uAC08\uC0C9",
   "Campaign maps": "\uCEA0\uD398\uC778 \uB9F5",
+  "Cancel": "\uCDE8\uC18C",
   "Check {name}": "{name} \uAC80\uC0AC",
   "Check: nothing found.": "\uAC80\uC0AC: \uCC3E\uC740 \uAC83 \uC5C6\uC74C.",
   "Check: {e} errors, {w} warnings.": "\uAC80\uC0AC: \uC624\uB958 {e}\uAC1C, \uACBD\uACE0 {w}\uAC1C.",
@@ -6422,8 +6525,12 @@ var KO = {
   "Check\u2026": "\uAC80\uC0AC\u2026",
   "Choose a File\u2026": "\uD30C\uC77C \uC120\uD0DD\u2026",
   "Choose a Folder\u2026": "\uD3F4\uB354 \uC120\uD0DD\u2026",
+  "Choose a GRP to import over first.": "\uBA3C\uC800 \uB36E\uC5B4\uC4F8 GRP\uB97C \uACE0\uB974\uC138\uC694.",
+  "Choose a GRP.": "GRP\uB97C \uACE0\uB974\uC138\uC694.",
+  "Choose a row to play its file or replace it. Double-click a row to play it.": "\uD589\uC744 \uACE0\uB974\uBA74 \uADF8 \uD30C\uC77C\uC744 \uC7AC\uC0DD\uD558\uAC70\uB098 \uBC14\uAFC0 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uD589\uC744 \uB450 \uBC88 \uD074\uB9AD\uD558\uBA74 \uC7AC\uC0DD\uD569\uB2C8\uB2E4.",
   "Choose a script.": "\uC2A4\uD06C\uB9BD\uD2B8\uB97C \uACE0\uB974\uC138\uC694.",
   "Choose an entry to see every field, what it points at, and what uses it. Double-click a value to change it.": "\uD56D\uBAA9\uC744 \uACE0\uB974\uBA74 \uBAA8\uB4E0 \uD544\uB4DC\uC640 \uADF8\uAC83\uC774 \uAC00\uB9AC\uD0A4\uB294 \uAC83, \uADF8\uAC83\uC744 \uC4F0\uB294 \uAC83\uC774 \uBCF4\uC785\uB2C8\uB2E4. \uAC12\uC744 \uB450 \uBC88 \uD074\uB9AD\uD558\uBA74 \uBC14\uAFC0 \uC218 \uC788\uC2B5\uB2C8\uB2E4.",
+  "Choose an overlay file.": "\uC624\uBC84\uB808\uC774 \uD30C\uC77C\uC744 \uACE0\uB974\uC138\uC694.",
   "Close": "\uB2EB\uAE30",
   "Close this mod and open another": "\uC774 \uBAA8\uB4DC\uB97C \uB2EB\uACE0 \uB2E4\uB978 \uBAA8\uB4DC \uC5F4\uAE30",
   "Close {name} and open another mod? Changes not saved are lost.": "{name|\uC744} \uB2EB\uACE0 \uB2E4\uB978 \uBAA8\uB4DC\uB97C \uC5F4\uAE4C\uC694? \uC800\uC7A5\uD558\uC9C0 \uC54A\uC740 \uBCC0\uACBD\uC740 \uC0AC\uB77C\uC9D1\uB2C8\uB2E4.",
@@ -6437,21 +6544,44 @@ var KO = {
   "Entries with no name of their own: most of a widened table is unused rows": "\uC774\uB984\uC774 \uC5C6\uB294 \uD56D\uBAA9: \uB298\uC5B4\uB09C \uD45C\uC758 \uB300\uBD80\uBD84\uC740 \uC4F0\uC9C0 \uC54A\uB294 \uD589\uC785\uB2C8\uB2E4",
   "Entry": "\uD56D\uBAA9",
   "Entry {id} does not store {field} in this layout.": "\uD56D\uBAA9 {id}\uC5D0\uB294 \uC774 \uBC30\uCE58\uC5D0\uC11C {field} \uD544\uB4DC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "Every pixel is a colour of the palette: nothing is lost.": "\uBAA8\uB4E0 \uD53D\uC140\uC774 \uD314\uB808\uD2B8\uC758 \uC0C9\uC785\uB2C8\uB2E4: \uC783\uB294 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "Export PNG": "PNG\uB85C \uB0B4\uBCF4\uB0B4\uAE30",
   "Export as MPQ": "MPQ\uB85C \uB0B4\uBCF4\uB0B4\uAE30",
+  "Facing": "\uBC29\uD5A5",
+  "File": "\uD30C\uC77C",
   "Flingy": "Flingy",
+  "Frame {frame} is past the GRP's {n} frames.": "\uD504\uB808\uC784 {frame}|\uC740 GRP\uC758 \uD504\uB808\uC784 {n}\uAC1C\uB97C \uB118\uC2B5\uB2C8\uB2E4.",
+  "Frame {i} of {file} replaced from {png}.": "{file}\uC758 \uD504\uB808\uC784 {i}|\uC744 {png}|\uC73C\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
+  "Frame {i} of {n}: {w} \xD7 {h} at {x}, {y}": "\uD504\uB808\uC784 {i} / {n}: {w} \xD7 {h}, \uC704\uCE58 {x}, {y}",
+  "Frames": "\uD504\uB808\uC784",
+  "Game frame {tick} \xB7 GRP frame {frame}{flip} \xB7 facing {dir}": "\uAC8C\uC784 \uD504\uB808\uC784 {tick} \xB7 GRP \uD504\uB808\uC784 {frame}{flip} \xB7 \uBC29\uD5A5 {dir}",
   "Handing {name} to the play page\u2026": "{name|\uC744} \uD50C\uB808\uC774 \uD398\uC774\uC9C0\uC5D0 \uB118\uAE30\uB294 \uC911\u2026",
   "Hit points go in 1/256ths.": "\uCCB4\uB825\uC740 1/256 \uB2E8\uC704\uC785\uB2C8\uB2E4.",
   "How many entries of other tables point at this one": "\uB2E4\uB978 \uD45C\uC758 \uD56D\uBAA9 \uC911 \uC774 \uD56D\uBAA9\uC744 \uAC00\uB9AC\uD0A4\uB294 \uC218",
   "Id": "ID",
+  "Image": "\uC774\uBBF8\uC9C0",
+  "Image {id} ({path}), iscript {script}": "\uC774\uBBF8\uC9C0 {id} ({path}), iscript {script}",
   "Images": "\uC774\uBBF8\uC9C0",
+  "Import PNG\u2026": "PNG \uAC00\uC838\uC624\uAE30\u2026",
+  "Import {png}": "{png} \uAC00\uC838\uC624\uAE30",
+  "In the mod": "\uBAA8\uB4DC\uC5D0 \uC788\uC74C",
+  "It replaces all {n} frames of {file}.": "{file}\uC758 \uD504\uB808\uC784 {n}\uAC1C\uB97C \uBAA8\uB450 \uBC14\uAFC9\uB2C8\uB2E4.",
+  "It replaces frame {i} of {file}.": "{file}\uC758 \uD504\uB808\uC784 {i}|\uC744 \uBC14\uAFC9\uB2C8\uB2E4.",
+  "Its picture and animation \u2192": "\uADF8\uB9BC\uACFC \uC560\uB2C8\uBA54\uC774\uC158 \u2192",
   "Line {line}: {message}. The script keeps its last text that assembled.": "{line}\uBC88 \uC904: {message}. \uC2A4\uD06C\uB9BD\uD2B8\uB294 \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC5B4\uC148\uBE14\uB41C \uD14D\uC2A4\uD2B8\uB97C \uC720\uC9C0\uD569\uB2C8\uB2E4.",
   "Loading the code editor\u2026": "\uCF54\uB4DC \uD3B8\uC9D1\uAE30\uB97C \uBD88\uB7EC\uC624\uB294 \uC911\u2026",
   "Look across the tables for what would break in the game": "\uAC8C\uC784\uC5D0\uC11C \uBB38\uC81C\uAC00 \uB420 \uAC83\uC744 \uD45C \uC804\uCCB4\uC5D0\uC11C \uCC3E\uAE30",
   "Mod Editor": "\uBAA8\uB4DC \uD3B8\uC9D1\uAE30",
   "Name": "\uC774\uB984",
+  "Neither the mod nor the game here has a sound table.": "\uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC18C\uB9AC \uD45C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "No file differs from the mod as it was opened.": "\uC5F4\uC5C8\uC744 \uB54C\uC758 \uBAA8\uB4DC\uC640 \uB2E4\uB978 \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "No file differs from the mod as it was opened: nothing to save.": "\uC5F4\uC5C8\uC744 \uB54C\uC758 \uBAA8\uB4DC\uC640 \uB2E4\uB978 \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4: \uC800\uC7A5\uD560 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "No image chosen.": "\uACE0\uB978 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "No image draws this GRP, so it has no script to play.": "\uC774 GRP\uB97C \uADF8\uB9AC\uB294 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC5B4 \uC7AC\uC0DD\uD560 \uC2A4\uD06C\uB9BD\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "No iscript defines {id}.": "{id}|\uC744 \uC815\uC758\uD558\uB294 iscript\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "No script defines iscript {id}.": "iscript {id|\uC744} \uC815\uC758\uD558\uB294 \uC2A4\uD06C\uB9BD\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "No team colour": "\uD300 \uC0C9 \uC5C6\uC74C",
+  "Not imported.": "\uAC00\uC838\uC624\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
   "Not saved.": "\uC800\uC7A5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
   "Not saved: {error}": "\uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "Nothing differs.": "\uB2E4\uB978 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
@@ -6459,85 +6589,152 @@ var KO = {
   "Nothing of an .exe is run; its archive is read.": ".exe\uB294 \uC2E4\uD589\uD558\uC9C0 \uC54A\uACE0 \uADF8 \uC548\uC758 \uC544\uCE74\uC774\uBE0C\uB9CC \uC77D\uC2B5\uB2C8\uB2E4.",
   "Nothing points at this entry.": "\uC774 \uD56D\uBAA9\uC744 \uAC00\uB9AC\uD0A4\uB294 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "Nothing was handed over.": "\uB118\uACA8\uBC1B\uC740 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "Only the mod's own": "\uBAA8\uB4DC\uC758 \uAC83\uB9CC",
   "Open a Mod\u2026": "\uBAA8\uB4DC \uC5F4\uAE30\u2026",
   "Opened in {s} s. {found}": "{s}\uCD08 \uB9CC\uC5D0 \uC5F4\uC5C8\uC2B5\uB2C8\uB2E4. {found}",
   "Opening {name}\u2026": "{name|\uC744} \uC5EC\uB294 \uC911\u2026",
   "Open\u2026": "\uC5F4\uAE30\u2026",
+  "Orange": "\uC8FC\uD669",
   "Orders": "\uBA85\uB839",
+  "Overlays": "\uC624\uBC84\uB808\uC774",
   "Packing {n} files\u2026": "\uD30C\uC77C {n}\uAC1C\uB97C \uBB36\uB294 \uC911\u2026",
+  "Palette": "\uD314\uB808\uD2B8",
+  "Pause": "\uC77C\uC2DC \uC815\uC9C0",
+  "Pictures": "\uADF8\uB9BC",
   "Play": "\uD50C\uB808\uC774",
   "Play the mod on the play page, with the open map": "\uC5F4\uB9B0 \uB9F5\uC73C\uB85C \uD50C\uB808\uC774 \uD398\uC774\uC9C0\uC5D0\uC11C \uBAA8\uB4DC \uD50C\uB808\uC774",
+  "Playing {file} ({s} s).": "{file} \uC7AC\uC0DD \uC911 ({s}\uCD08).",
   "Playing {map} with {name} ({n} files, {hash}).": "{name|\uC73C\uB85C} {map} \uD50C\uB808\uC774 \uC911 (\uD30C\uC77C {n}\uAC1C, {hash}).",
   "Portraits": "\uCD08\uC0C1\uD654",
+  "Preview": "\uBBF8\uB9AC \uBCF4\uAE30",
+  "Purple": "\uBCF4\uB77C",
+  'Read the game\'s state, so taken as "no": {names}.': '\uAC8C\uC784 \uC0C1\uD0DC\uB97C \uC77D\uC73C\uBBC0\uB85C "\uC544\uB2C8\uC624"\uB85C \uCC98\uB9AC: {names}.',
   "Reading\u2026": "\uC77D\uB294 \uC911\u2026",
+  "Recorded {s} s.": "{s}\uCD08\uB97C \uB179\uC74C\uD588\uC2B5\uB2C8\uB2E4.",
+  "Recording\u2026 press Stop Recording when done.": "\uB179\uC74C \uC911\u2026 \uB05D\uB098\uBA74 \uB179\uC74C \uC911\uC9C0\uB97C \uB204\uB974\uC138\uC694.",
+  "Record\u2026": "\uB179\uC74C\u2026",
+  "Red": "\uBE68\uAC15",
+  "Replace\u2026": "\uBC14\uAFB8\uAE30\u2026",
+  "Restart": "\uCC98\uC74C\uBD80\uD130",
+  "Row": "\uD589",
+  "Rows with no file too": "\uD30C\uC77C \uC5C6\uB294 \uD589\uB3C4",
   "Save": "\uC800\uC7A5",
+  "Save WAV\u2026": "WAV \uC800\uC7A5\u2026",
   "Save as Folder": "\uD3F4\uB354\uB85C \uC800\uC7A5",
+  "Saved {file}.": "{file} \uC800\uC7A5.",
+  "Saved {file}: the sheet in the palette {palette}; import it back to change the picture.": "{file} \uC800\uC7A5: \uD314\uB808\uD2B8 {palette}\uB85C \uADF8\uB9B0 \uC2DC\uD2B8\uC785\uB2C8\uB2E4. \uB2E4\uC2DC \uAC00\uC838\uC624\uBA74 \uADF8\uB9BC\uC774 \uBC14\uB01D\uB2C8\uB2E4.",
   "Saved {file}: {what}.": "{file} \uC800\uC7A5: {what}.",
   "Saving\u2026": "\uC800\uC7A5\uD558\uB294 \uC911\u2026",
   "Scripts": "\uC2A4\uD06C\uB9BD\uD2B8",
+  "Search": "\uAC80\uC0C9",
+  "Search files and row numbers": "\uD30C\uC77C\uACFC \uD589 \uBC88\uD638 \uAC80\uC0C9",
   "Search names and ids": "\uC774\uB984\uACFC ID \uAC80\uC0C9",
+  "Search paths": "\uACBD\uB85C \uAC80\uC0C9",
   "Search text and entry numbers": "\uD14D\uC2A4\uD2B8\uC640 \uD56D\uBAA9 \uBC88\uD638 \uAC80\uC0C9",
+  "Sheet": "\uC2DC\uD2B8",
+  "Skipped (no picture of their own here): {names}.": "\uAC74\uB108\uB700 (\uC5EC\uAE30\uC11C\uB294 \uADF8\uB9BC\uC5D0 \uC601\uD5A5 \uC5C6\uC74C): {names}.",
+  "Sound {id}": "\uC18C\uB9AC {id}",
   "Sounds": "\uC18C\uB9AC",
   "Sprites": "\uC2A4\uD504\uB77C\uC774\uD2B8",
   "StarCraft mod": "\uC2A4\uD0C0\uD06C\uB798\uD504\uD2B8 \uBAA8\uB4DC",
+  "Step": "\uD55C \uD504\uB808\uC784",
+  "Stop": "\uC815\uC9C0",
+  "Stop Recording": "\uB179\uC74C \uC911\uC9C0",
+  "Stopped at byte {byte} (offset {at}), which is no opcode of 1.16.1: a plugin's own.": "\uBC14\uC774\uD2B8 {byte}(\uC624\uD504\uC14B {at})\uC5D0\uC11C \uBA48\uCDA4: 1.16.1\uC758 \uBA85\uB839\uC774 \uC544\uB2D9\uB2C8\uB2E4. \uD50C\uB7EC\uADF8\uC778 \uACE0\uC720\uC758 \uBA85\uB839\uC785\uB2C8\uB2E4.",
+  "Stopped at {name} (offset {at}): the preview does not model it. A running game shows the rest (Play, or Test Map).": "{name}(\uC624\uD504\uC14B {at})\uC5D0\uC11C \uBA48\uCDA4: \uBBF8\uB9AC \uBCF4\uAE30\uB294 \uC774 \uBA85\uB839\uC744 \uB2E4\uB8E8\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uB098\uBA38\uC9C0\uB294 \uC2E4\uD589 \uC911\uC778 \uAC8C\uC784\uC5D0\uC11C \uBCF4\uC785\uB2C8\uB2E4 (\uD50C\uB808\uC774 \uB610\uB294 \uB9F5 \uD14C\uC2A4\uD2B8).",
+  "Stopped: the script runs on without a wait (offset {at}).": "\uBA48\uCDA4: \uC2A4\uD06C\uB9BD\uD2B8\uAC00 wait \uC5C6\uC774 \uACC4\uC18D \uC2E4\uD589\uB429\uB2C8\uB2E4 (\uC624\uD504\uC14B {at}).",
   "Strings": "\uBB38\uC790\uC5F4",
   "Supply goes in halves.": "\uBCF4\uAE09\uC740 0.5 \uB2E8\uC704\uC785\uB2C8\uB2E4.",
   "Tables": "\uD45C",
+  "Teal": "\uCCAD\uB85D",
+  "Team colour (tunit.pcx)": "\uD300 \uC0C9 (tunit.pcx)",
+  "Team colour: row {n}": "\uD300 \uC0C9: {n}\uBC88 \uD589",
+  "Team colour: {name}": "\uD300 \uC0C9: {name}",
   "Technologies": "\uAE30\uC220",
   "Text": "\uD14D\uC2A4\uD2B8",
+  "The animation ended.": "\uC560\uB2C8\uBA54\uC774\uC158\uC774 \uB05D\uB0AC\uC2B5\uB2C8\uB2E4.",
+  "The animation of the script at the cursor, for the first image that uses it.": "\uCEE4\uC11C\uAC00 \uC788\uB294 \uC2A4\uD06C\uB9BD\uD2B8\uC758 \uC560\uB2C8\uBA54\uC774\uC158\uC744, \uADF8\uAC83\uC744 \uC4F0\uB294 \uCCAB \uC774\uBBF8\uC9C0\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4.",
   "The archive inside {file} could not be opened: {error}": "{file} \uC548\uC758 \uC544\uCE74\uC774\uBE0C\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The browser did not open the play page's tab. Allow pop-ups for this page and press Play again.": "\uBE0C\uB77C\uC6B0\uC800\uAC00 \uD50C\uB808\uC774 \uD398\uC774\uC9C0 \uD0ED\uC744 \uC5F4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uC774 \uD398\uC774\uC9C0\uC758 \uD31D\uC5C5\uC744 \uD5C8\uC6A9\uD558\uACE0 \uB2E4\uC2DC \uD50C\uB808\uC774\uB97C \uB204\uB974\uC138\uC694.",
   "The code editor could not be loaded: {error}": "\uCF54\uB4DC \uD3B8\uC9D1\uAE30\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The editor is not drawing from this mod now.": "\uD3B8\uC9D1\uAE30\uB294 \uC9C0\uAE08 \uC774 \uBAA8\uB4DC\uC758 \uD30C\uC77C\uB85C \uADF8\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
   "The files you changed, in their folders, in a zip: copy them over the mod's folder": "\uBC14\uAFBC \uD30C\uC77C\uC744 \uC6D0\uB798 \uD3F4\uB354 \uAD6C\uC870 \uADF8\uB300\uB85C zip\uC73C\uB85C: \uBAA8\uB4DC \uD3F4\uB354 \uC704\uC5D0 \uBCF5\uC0AC\uD558\uC138\uC694",
   "The folder of text and pictures, in a zip": "\uD14D\uC2A4\uD2B8\uC640 \uADF8\uB9BC \uD3F4\uB354\uB97C zip\uC73C\uB85C",
+  "The image's GRP is not there.": "\uC774\uBBF8\uC9C0\uC758 GRP\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "The microphone is not available: {error}": "\uB9C8\uC774\uD06C\uB97C \uC4F8 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: {error}",
   "The mod as a folder of text and pictures (scmjs mod unpack's form), in a zip": "\uBAA8\uB4DC\uB97C \uD14D\uC2A4\uD2B8\uC640 \uADF8\uB9BC \uD3F4\uB354(scmjs mod unpack\uC758 \uD615\uC2DD)\uB85C, zip\uC5D0 \uB2F4\uC544",
   "The mod as an MPQ": "\uBAA8\uB4DC\uB97C MPQ\uB85C",
   "The mod as an MPQ the launchers load": "\uB7F0\uCC98\uAC00 \uC77D\uB294 MPQ\uB85C \uB41C \uBAA8\uB4DC",
   "The mod could not be opened: {error}": "\uBAA8\uB4DC\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The mod has no animation or AI scripts.": "\uC774 \uBAA8\uB4DC\uC5D0\uB294 \uC560\uB2C8\uBA54\uC774\uC158 \uC2A4\uD06C\uB9BD\uD2B8\uB098 AI \uC2A4\uD06C\uB9BD\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "The mod has no overlay files.": "\uC774 \uBAA8\uB4DC\uC5D0\uB294 \uC624\uBC84\uB808\uC774 \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "The mod has no {table} table.": "\uC774 \uBAA8\uB4DC\uC5D0\uB294 {table} \uD45C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "The mod's hash is {hash}.": "\uBAA8\uB4DC\uC758 \uD574\uC2DC\uB294 {hash}\uC785\uB2C8\uB2E4.",
+  "The palette {name} is in neither the mod nor the game's files here.": "\uD314\uB808\uD2B8 {name}|\uC740 \uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "The play page did not answer. Is it open in another tab?": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uAC00 \uC751\uB2F5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uD0ED\uC5D0 \uC5F4\uB824 \uC788\uB098\uC694?",
   "The play page has {name} ({n} files, {hash}); choose a map there.": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uAC00 {name|\uC744} \uBC1B\uC558\uC2B5\uB2C8\uB2E4 (\uD30C\uC77C {n}\uAC1C, {hash}). \uAC70\uAE30\uC11C \uB9F5\uC744 \uACE0\uB974\uC138\uC694.",
   "The play page said: {message}": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uC758 \uC751\uB2F5: {message}",
+  "The sheet says it was drawn in the palette {was}; it is read in {now}.": "\uC2DC\uD2B8\uB294 \uD314\uB808\uD2B8 {was}\uB85C \uADF8\uB824\uC84C\uB2E4\uACE0 \uD569\uB2C8\uB2E4. {now}|\uC73C\uB85C \uC77D\uC2B5\uB2C8\uB2E4.",
   "The string table": "\uBB38\uC790\uC5F4 \uD45C",
   "The table": "\uD45C",
   "There is no play page at {address}: it is served beside the editor on scmjs.dev, not by a development server of the editor alone.": "{address}\uC5D0 \uD50C\uB808\uC774 \uD398\uC774\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4: \uD50C\uB808\uC774 \uD398\uC774\uC9C0\uB294 scmjs.dev\uC5D0\uC11C \uD3B8\uC9D1\uAE30 \uC606\uC5D0 \uC81C\uACF5\uB418\uBA70, \uD3B8\uC9D1\uAE30\uB9CC\uC758 \uAC1C\uBC1C \uC11C\uBC84\uC5D0\uB294 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "This editor cannot draw from a mod in memory; update it to see the edits on the map.": "\uC774 \uD3B8\uC9D1\uAE30\uB294 \uBA54\uBAA8\uB9AC\uC758 \uBAA8\uB4DC\uB85C \uADF8\uB9B4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uB9F5\uC5D0\uC11C \uBCC0\uACBD\uC744 \uBCF4\uB824\uBA74 \uD3B8\uC9D1\uAE30\uB97C \uC5C5\uB370\uC774\uD2B8\uD558\uC138\uC694.",
+  "This row plays no file.": "\uC774 \uD589\uC740 \uD30C\uC77C\uC744 \uC7AC\uC0DD\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
+  "This script has no {anim} animation.": "\uC774 \uC2A4\uD06C\uB9BD\uD2B8\uC5D0\uB294 {anim} \uC560\uB2C8\uBA54\uC774\uC158\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "Units": "\uC720\uB2DB",
   "Unnamed too": "\uC774\uB984 \uC5C6\uB294 \uAC83\uB3C4",
   "Upgrades": "\uC5C5\uADF8\uB808\uC774\uB4DC",
+  "Use It": "\uC0AC\uC6A9",
   "Used": "\uC0AC\uC6A9",
   "Used by": "\uC0AC\uC6A9\uD558\uB294 \uACF3",
   "Weapons": "\uBB34\uAE30",
   "What changed in {name}": "{name}\uC758 \uBCC0\uACBD \uB0B4\uC5ED",
   "What changed: against the game, or against the mod as it was opened": "\uBCC0\uACBD \uB0B4\uC5ED: \uAC8C\uC784\uACFC, \uB610\uB294 \uC5F4\uC5C8\uC744 \uB54C\uC758 \uBAA8\uB4DC\uC640 \uBE44\uAD50",
+  "White": "\uD770\uC0C9",
   "Working out the mod's hash over {size}\u2026": "{size}\uC5D0 \uB300\uD55C \uBAA8\uB4DC \uD574\uC2DC\uB97C \uACC4\uC0B0\uD558\uB294 \uC911\u2026",
   "Writing {name}\u2026": "{name|\uC744} \uC4F0\uB294 \uC911\u2026",
+  "Yellow": "\uB178\uB791",
   "a folder of the game's files": "\uAC8C\uC784 \uD30C\uC77C \uD3F4\uB354",
   "a mod folder": "\uBAA8\uB4DC \uD3F4\uB354",
   "a self-executing mod (its archive read, nothing run)": "\uC790\uB3D9 \uC2E4\uD589 \uBAA8\uB4DC (\uC544\uCE74\uC774\uBE0C\uB9CC \uC77D\uACE0 \uC2E4\uD589\uD558\uC9C0 \uC54A\uC74C)",
   "a zip": "zip",
   "an MPQ": "MPQ",
   "and {n} more": "\uC678 {n}\uAC1C",
+  "and {n} more: search to find them": "\uC678 {n}\uAC1C: \uAC80\uC0C9\uD574\uC11C \uCC3E\uC73C\uC138\uC694",
+  "file {n}": "\uD30C\uC77C {n}",
+  "image {id}": "\uC774\uBBF8\uC9C0 {id}",
+  "index {i}": "\uC778\uB371\uC2A4 {i}",
+  "mono": "\uBAA8\uB178",
+  "no image draws it": "\uADF8\uB9AC\uB294 \uC774\uBBF8\uC9C0 \uC5C6\uC74C",
   "none": "\uC5C6\uC74C",
   "nothing of the game's": "\uAC8C\uC784 \uD30C\uC77C \uC5C6\uC74C",
+  "stereo": "\uC2A4\uD14C\uB808\uC624",
   "the game's": "\uAC8C\uC784\uC758 \uAC83",
+  "the recording": "\uB179\uC74C",
   "the same picture": "\uAC19\uC740 \uADF8\uB9BC",
   "the same sound file": "\uAC19\uC740 \uC18C\uB9AC \uD30C\uC77C",
   "unit {id}'s name": "\uC720\uB2DB {id}\uC758 \uC774\uB984",
+  "used by ": "\uC0AC\uC6A9: ",
+  "yes": "\uC608",
   "{done} of {total} files\u2026": "\uD30C\uC77C {total}\uAC1C \uC911 {done}\uAC1C\u2026",
   "{e} errors (what breaks or shows nothing in the game) and {w} warnings (what is probably a mistake). Click one to go to it.": "\uC624\uB958 {e}\uAC1C(\uAC8C\uC784\uC5D0\uC11C \uBA48\uCD94\uAC70\uB098 \uC544\uBB34\uAC83\uB3C4 \uBCF4\uC774\uC9C0 \uC54A\uB294 \uAC83)\uC640 \uACBD\uACE0 {w}\uAC1C(\uC2E4\uC218\uC77C \uAC00\uB2A5\uC131\uC774 \uB192\uC740 \uAC83). \uD074\uB9AD\uD558\uBA74 \uADF8\uACF3\uC73C\uB85C \uAC11\uB2C8\uB2E4.",
   "{field} holds a whole number from 0 to {max} ({type}).": "{field}\uC5D0\uB294 0\uBD80\uD130 {max}\uAE4C\uC9C0\uC758 \uC815\uC218\uAC00 \uB4E4\uC5B4\uAC11\uB2C8\uB2E4 ({type}).",
   "{field} is in parts: {parts}.": "{field}\uB294 \uC5EC\uB7EC \uBD80\uBD84\uC73C\uB85C \uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4: {parts}.",
   "{file} cannot be shown as text: {why}": "{file|\uC744} \uD14D\uC2A4\uD2B8\uB85C \uBCF4\uC77C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: {why}",
   "{file} could not be opened as an archive: {error}": "{file}|\uC744 \uC544\uCE74\uC774\uBE0C\uB85C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
+  "{file} does not play here: {error}": "{file}|\uC740 \uC5EC\uAE30\uC11C \uC7AC\uC0DD\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: {error}",
   "{file} entry {n} changed.": "{file} \uD56D\uBAA9 {n|\uC744} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
   "{file} gave no {member}.": "{file}\uC5D0\uC11C {member}|\uC774 \uB098\uC624\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
+  "{file} is in neither the mod nor the game's files here.": "{file}|\uC740 \uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "{file} is not a mod: not an MPQ, a self-executing exe or a zip.": "{file}|\uC740 \uBAA8\uB4DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: MPQ\uB3C4, \uC790\uB3D9 \uC2E4\uD589 exe\uB3C4, zip\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
   "{file} is not a zip.": "{file}|\uC740 zip\uC774 \uC544\uB2D9\uB2C8\uB2E4.",
+  "{file} is not read as a GRP: {error}": "{file}|\uC744 GRP\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
+  "{file} is not read as a PNG: {error}": "{file}|\uC744 PNG\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
+  "{file} is {w} \xD7 {h}: fewer cells than the GRP's {n} frames of {fw} \xD7 {fh}.": "{file}|\uC740 {w} \xD7 {h}\uC785\uB2C8\uB2E4: {fw} \xD7 {fh} \uD504\uB808\uC784 {n}\uAC1C\uC778 GRP\uBCF4\uB2E4 \uCE78\uC774 \uC801\uC2B5\uB2C8\uB2E4.",
+  "{file} is {w} \xD7 {h}: neither one frame ({fw} \xD7 {fh}) nor a sheet of them.": "{file}|\uC740 {w} \xD7 {h}\uC785\uB2C8\uB2E4: \uD504\uB808\uC784 \uD558\uB098({fw} \xD7 {fh})\uB3C4, \uD504\uB808\uC784 \uC2DC\uD2B8\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
+  "{file} replaced by {name} ({s} s{converted}){shared}.": "{file}|\uC744 {name}|\uC73C\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4 ({s}\uCD08{converted}){shared}.",
   "{file}, line {line}": "{file}, {line}\uBC88 \uC904",
+  "{file}: every frame replaced from {png}.": "{file}: \uBAA8\uB4E0 \uD504\uB808\uC784\uC744 {png}|\uC73C\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
   "{file}: {error}": "{file}: {error}",
   "{file}: {lines} lines, {bytes} bytes as assembled.": "{file}: {lines}\uC904, \uC5B4\uC148\uBE14\uD558\uBA74 {bytes}\uBC14\uC774\uD2B8.",
   "{label}{hash}: the unit palette, the settings dialogs' defaults and the units drawn follow the mod's files as you edit them.": "{label}{hash}: \uC720\uB2DB \uD314\uB808\uD2B8, \uC124\uC815 \uB300\uD654 \uC0C1\uC790\uC758 \uAE30\uBCF8\uAC12, \uADF8\uB824\uC9C0\uB294 \uC720\uB2DB\uC774 \uD3B8\uC9D1\uD558\uB294 \uB300\uB85C \uBAA8\uB4DC\uC758 \uD30C\uC77C\uC744 \uB530\uB985\uB2C8\uB2E4.",
@@ -6560,13 +6757,21 @@ var KO = {
   "{n, plural, one {{count} terrain file} other {{count} terrain files}}": "\uC9C0\uD615 \uD30C\uC77C {count}\uAC1C",
   "{named} named {what} of {total}": "{total}\uAC1C \uC911 \uC774\uB984 \uC788\uB294 {what} {named}\uAC1C",
   "{name} changes nothing of the game here: every file is the game's own.": "{name|\uC740} \uC5EC\uAE30\uC11C \uAC8C\uC784\uC758 \uC5B4\uB5A4 \uAC83\uB3C4 \uBC14\uAFB8\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: \uBAA8\uB4E0 \uD30C\uC77C\uC774 \uAC8C\uC784\uC758 \uAC83\uACFC \uAC19\uC2B5\uB2C8\uB2E4.",
+  "{name} is not a sound this page can read: {error}": "{name}|\uC740 \uC774 \uD398\uC774\uC9C0\uAC00 \uC77D\uC744 \uC218 \uC788\uB294 \uC18C\uB9AC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: {error}",
   "{name}, from {from}: {files} files ({size}) \u2014 {kinds}.": "{name}, {from}\uC5D0\uC11C: \uD30C\uC77C {files}\uAC1C ({size}) \u2014 {kinds}.",
   "{n} KB": "{n} KB",
   "{n} MB": "{n} MB",
   "{n} bytes": "{n}\uBC14\uC774\uD2B8",
+  "{n} colours are not in the palette {palette}: {pixels} pixels take the nearest colour it has.": "\uC0C9 {n}\uAC1C\uAC00 \uD314\uB808\uD2B8 {palette}\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4: \uD53D\uC140 {pixels}\uAC1C\uAC00 \uAC00\uC7A5 \uAC00\uAE4C\uC6B4 \uC0C9\uC774 \uB429\uB2C8\uB2E4.",
   "{n} files in an MPQ, {size}": "MPQ\uC5D0 \uD30C\uC77C {n}\uAC1C, {size}",
   "{n} files of text and pictures in a zip, {size}{kept}": "zip\uC5D0 \uD14D\uC2A4\uD2B8\uC640 \uADF8\uB9BC \uD30C\uC77C {n}\uAC1C, {size}{kept}",
+  "{n, plural, one {{count} frame} other {{count} frames}}": "\uD504\uB808\uC784 {count}\uAC1C",
+  "{n} pixels": "\uD53D\uC140 {n}\uAC1C",
+  "{n} pixels were partly transparent and are now either opaque or transparent.": "\uBC18\uD22C\uBA85\uC774\uB358 \uD53D\uC140 {n}\uAC1C\uAC00 \uBD88\uD22C\uBA85 \uB610\uB294 \uD22C\uBA85\uC774 \uB418\uC5C8\uC2B5\uB2C8\uB2E4.",
+  "{own} GRPs in the mod, {game} of the game's; {shown} shown": "\uBAA8\uB4DC\uC758 GRP {own}\uAC1C, \uAC8C\uC784\uC758 \uAC83 {game}\uAC1C; {shown}\uAC1C \uD45C\uC2DC",
+  "{rate} Hz \xB7 {bits}-bit \xB7 {ch}": "{rate} Hz \xB7 {bits}\uBE44\uD2B8 \xB7 {ch}",
   "{shown} of {total} found": "{total}\uAC1C \uC911 {shown}\uAC1C \uCC3E\uC74C",
+  "{shown} shown; {files} of {rows} rows play a file": "{shown}\uAC1C \uD45C\uC2DC; \uD589 {rows}\uAC1C \uC911 {files}\uAC1C\uAC00 \uD30C\uC77C\uC744 \uC7AC\uC0DD",
   "{table} has no entry {id}.": "{table}\uC5D0\uB294 \uD56D\uBAA9 {id|\uC774} \uC5C6\uC2B5\uB2C8\uB2E4.",
   "{table} has no field {field}.": "{table}\uC5D0\uB294 {field} \uD544\uB4DC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "{total} entries": "\uD56D\uBAA9 {total}\uAC1C",
@@ -6794,8 +6999,8 @@ function attachReader(files, off = () => false) {
   let index = null;
   let manifest = null;
   const reader = async (path) => {
-    if (off()) return null;
     const clean = path.replace(/\\/g, "/").replace(/^\/+/, "").toLowerCase();
+    if (off(clean)) return null;
     if (!index) {
       index = /* @__PURE__ */ new Map();
       for (const m of files.members()) index.set(storedPathOf(m), gameName(m));
@@ -9670,9 +9875,924 @@ async function changedZip(session) {
   return { zip: writeZip(files), count: files.length };
 }
 
+// pictures.ts
+var PALETTES = ["jungle", "badlands", "platform", "install", "ashworld", "desert", "ice", "twilight"];
+function pictureList(session, gameGrps = []) {
+  const byPath = /* @__PURE__ */ new Map();
+  for (const k of session.members()) if (k.endsWith(".grp")) byPath.set(k, { member: k, own: true, images: [] });
+  for (const p of gameGrps) {
+    const k = gameName(`unit\\${p}`);
+    if (!byPath.has(k)) byPath.set(k, { member: k, own: false, images: [] });
+  }
+  const images = session.table("images"), tbl = session.data.strings.images;
+  if (images && tbl) {
+    for (let id = 0; id < images.count; id++) {
+      const v = images.columns.grp_file[id];
+      if (!v || v > tbl.length) continue;
+      const path = entryText(tbl[v - 1]);
+      if (!path) continue;
+      const member = gameName(`unit\\${path}`);
+      let e = byPath.get(member);
+      if (!e) {
+        e = { member, own: false, images: [] };
+        byPath.set(member, e);
+      }
+      e.images.push(id);
+    }
+  }
+  return [...byPath.values()].sort((a2, b) => a2.member < b.member ? -1 : 1);
+}
+function paletteRgba(colours) {
+  const step = colours.length >= 1024 ? 4 : 3;
+  const out = new Uint8Array(1024);
+  for (let i2 = 0; i2 < 256; i2++) {
+    out[i2 * 4] = colours[i2 * step];
+    out[i2 * 4 + 1] = colours[i2 * step + 1];
+    out[i2 * 4 + 2] = colours[i2 * step + 2];
+    out[i2 * 4 + 3] = i2 === 0 ? 0 : 255;
+  }
+  return out;
+}
+function teamLut(tunit, row) {
+  const lut = new Uint8Array(256);
+  for (let i2 = 0; i2 < 256; i2++) lut[i2] = i2;
+  if (tunit && row !== null && row >= 0) {
+    const r = Math.min(Math.floor(tunit.length / 8) - 1, row);
+    for (let s = 0; s < 8; s++) lut[8 + s] = tunit[r * 8 + s] ?? 8 + s;
+  }
+  return lut;
+}
+function frameRgba(image, index, palette, lut, flip = false) {
+  const { width, height } = image;
+  const out = new Uint8ClampedArray(width * height * 4);
+  if (index < 0 || index >= image.frames.length) return out;
+  const pic = framePicture(image, index);
+  for (let y = 0; y < height; y++) {
+    for (let x3 = 0; x3 < width; x3++) {
+      const v = pic[y * width + x3];
+      if (!v) continue;
+      const c3 = lut[v] * 4, o = (y * width + (flip ? width - 1 - x3 : x3)) * 4;
+      out[o] = palette[c3];
+      out[o + 1] = palette[c3 + 1];
+      out[o + 2] = palette[c3 + 2];
+      out[o + 3] = 255;
+    }
+  }
+  return out;
+}
+function sheetRgba(image, palette, lut) {
+  const columns = sheetColumns(image.frames.length);
+  const rows2 = Math.max(1, Math.ceil(image.frames.length / columns));
+  const W2 = Math.max(1, image.width * columns), H = Math.max(1, image.height * rows2);
+  const rgba = new Uint8ClampedArray(W2 * H * 4);
+  image.frames.forEach((_, i2) => {
+    const f = frameRgba(image, i2, palette, lut);
+    const ox = i2 % columns * image.width, oy = Math.floor(i2 / columns) * image.height;
+    for (let y = 0; y < image.height; y++) rgba.set(f.subarray(y * image.width * 4, (y + 1) * image.width * 4), ((oy + y) * W2 + ox) * 4);
+  });
+  return { width: W2, height: H, rgba, columns };
+}
+async function importPng(current2, png, palette, frame) {
+  const img = await decodePng(png);
+  const fromSheet = !!img.text["scmjs:grp"];
+  if (!fromSheet && img.width === current2.width && img.height === current2.height) {
+    const one = await pngToGrp(png, palette, { frameWidth: current2.width, frameHeight: current2.height, frames: 1 });
+    const frames = current2.frames.slice();
+    frames[frame] = one.image.frames[0];
+    const image = { ...current2, frames, ...current2.shares ? { shares: current2.shares.map((s, i2) => i2 === frame ? i2 : s === frame ? i2 : s) } : {} };
+    return { kind: "frame", grp: encodeGrpImage(image), image, report: one.report };
+  }
+  if (fromSheet || img.width % current2.width === 0 && img.height % current2.height === 0) {
+    const cells = img.width / current2.width * (img.height / current2.height);
+    if (!fromSheet && cells < current2.frames.length) return { refused: "frames", width: img.width, height: img.height };
+    const out = await pngToGrp(png, palette, fromSheet ? {} : { frameWidth: current2.width, frameHeight: current2.height, frames: current2.frames.length });
+    return { kind: "sheet", ...out };
+  }
+  return { refused: "size", width: img.width, height: img.height };
+}
+function exportPng(bytes, palette, member) {
+  return grpToPng(decodeGrpImage(bytes), palette, { text: { "scmjs:path": member } });
+}
+
+// look.ts
+var Look = class {
+  palette = "jungle";
+  /** A `tunit.pcx` row, or -1 for none. */
+  team = 0;
+  wpe = /* @__PURE__ */ new Map();
+  tunit;
+  session;
+  constructor(session) {
+    this.session = session;
+  }
+  /** Reads the palette and team colours in use (once each). */
+  async load() {
+    if (!this.wpe.has(this.palette)) this.wpe.set(this.palette, await this.session.readOver(`tileset\\${this.palette}.wpe`));
+    if (this.tunit === void 0) {
+      const pcx = await this.session.readOver("game\\tunit.pcx");
+      try {
+        this.tunit = pcx ? decodePcxImage(pcx).pixels : null;
+      } catch {
+        this.tunit = null;
+      }
+    }
+  }
+  /** The palette's bytes as read, or null when neither the mod nor the game has it. */
+  colours() {
+    return this.wpe.get(this.palette) ?? null;
+  }
+  named() {
+    const c3 = this.colours();
+    return c3 ? { name: this.palette, colours: c3 } : null;
+  }
+  current() {
+    const c3 = this.colours();
+    return c3 ? { palette: paletteRgba(c3), lut: teamLut(this.tunit ?? null, this.team >= 0 ? this.team : null) } : null;
+  }
+  hasTeamColours() {
+    return !!this.tunit;
+  }
+};
+
+// animate.ts
+var BY_OP = new Map(ISCRIPT_OPCODES.map((o) => [o.op, o]));
+var SKIPPED = /* @__PURE__ */ new Set([
+  "playsnd",
+  "playsndrand",
+  "playsndbtwn",
+  "domissiledmg",
+  "attackmelee",
+  "followmaingraphic",
+  "attackwith",
+  "attack",
+  "castspell",
+  "useweapon",
+  "move",
+  "gotorepeatattk",
+  "engframe",
+  "engset",
+  "nobrkcodestart",
+  "nobrkcodeend",
+  "attkshiftproj",
+  "tmprmgraphicstart",
+  "tmprmgraphicend",
+  "setflspeed",
+  "creategasoverlays",
+  "sigorder",
+  "orderdone",
+  "dogrddamage",
+  "setspawnframe",
+  "playframtile",
+  "warpoverlay",
+  "uflunstable",
+  // Other images and sprites: the preview draws the one image.
+  "imgol",
+  "imgul",
+  "imgolorig",
+  "switchul",
+  "imgoluselo",
+  "imguluselo",
+  "sprol",
+  "highsprol",
+  "lowsprul",
+  "spruluselo",
+  "sprul",
+  "sproluselo",
+  "grdsprol",
+  "imgulnextid"
+]);
+var NO_BRANCH = /* @__PURE__ */ new Set(["pwrupcondjmp", "trgtrangecondjmp", "trgtarccondjmp", "curdirectcondjmp", "liftoffcondjmp"]);
+function decodeAt2(bytes, at) {
+  const op = BY_OP.get(bytes[at]);
+  if (!op) return null;
+  let p = at + 1;
+  const args = [];
+  let list;
+  for (const k of op.args) {
+    if (k === "b") {
+      args.push(bytes[p]);
+      p += 1;
+    } else if (k === "s") {
+      args.push(bytes[p] << 24 >> 24);
+      p += 1;
+    } else if (k === "N") {
+      const n = bytes[p];
+      p += 1;
+      list = [];
+      for (let i2 = 0; i2 < n; i2++) {
+        list.push(bytes[p] | bytes[p + 1] << 8);
+        p += 2;
+      }
+    } else {
+      args.push(bytes[p] | bytes[p + 1] << 8);
+      p += 2;
+    }
+    if (p > bytes.length) return null;
+  }
+  return { op, at, next: p, args, ...list ? { list } : {} };
+}
+var ScriptIndex = class {
+  files = [];
+  byHigh = /* @__PURE__ */ new Map();
+  constructor(files, imageIds = []) {
+    for (const f of files) {
+      try {
+        this.files.push({ ...f, headers: new Map(readIscriptHeaders(f.bytes).headers.map((h2) => [h2.id, h2.anims])) });
+      } catch {
+      }
+    }
+    const wide = /* @__PURE__ */ new Map();
+    for (let i2 = 0; i2 < imageIds.length; i2++) {
+      const v = imageIds[i2] >>> 0;
+      if (v > 65535) wide.set(v >>> 16, [...wide.get(v >>> 16) ?? [], v & 65535]);
+    }
+    for (const [high, lows] of wide) {
+      let best = -1, most = 0;
+      this.files.forEach((f, i2) => {
+        const n = lows.filter((l) => f.headers.has(l)).length;
+        if (n > most) {
+          most = n;
+          best = i2;
+        }
+      });
+      if (best >= 0) this.byHigh.set(high, best);
+    }
+  }
+  find(id) {
+    const v = id >>> 0;
+    const at = (f, key) => f.headers.has(key) ? { member: f.member, bytes: f.bytes, anims: f.headers.get(key) } : null;
+    if (v > 65535) {
+      const f = this.files[this.byHigh.get(v >>> 16) ?? -1];
+      const hit = f ? at(f, v & 65535) : null;
+      if (hit) return hit;
+    }
+    for (const f of this.files) {
+      const hit = at(f, v);
+      if (hit) return hit;
+    }
+    if (v > 65535) for (const f of this.files) {
+      const hit = at(f, v & 65535);
+      if (hit) return hit;
+    }
+    return null;
+  }
+};
+function animationsOf(anims) {
+  return anims.map((at, index) => ({ name: ISCRIPT_ANIMS[index] ?? `#${index}`, index, at })).filter((a2) => a2.at).map(({ name, index }) => ({ name, index }));
+}
+var AnimationRunner = class {
+  bytes;
+  turns;
+  pc;
+  wait = 0;
+  stack = [];
+  frameBase = 0;
+  flipState = false;
+  pose;
+  stopped = null;
+  /** Opcodes met and skipped (by name), and jumps that read the game (taken as "no"). */
+  skipped = /* @__PURE__ */ new Set();
+  noBranch = /* @__PURE__ */ new Set();
+  /** Game frames run. */
+  ticks = 0;
+  /** The opcode run last, for the line under the picture. */
+  last = null;
+  random;
+  constructor(bytes, entry, options) {
+    this.bytes = bytes;
+    this.turns = options.turns;
+    this.pc = entry;
+    this.random = options.random ?? Math.random;
+    this.pose = { frame: 0, flip: false, x: 0, y: 0, direction: options.direction ?? 0 };
+  }
+  setFrame() {
+    const d = (this.pose.direction % 32 + 32) % 32;
+    if (this.turns) {
+      this.pose.frame = this.frameBase + (d <= 16 ? d : 32 - d);
+      this.pose.flip = d > 16;
+    } else {
+      this.pose.frame = this.frameBase;
+      this.pose.flip = this.flipState;
+    }
+  }
+  /** One game frame: run until the script waits, ends, or meets what the preview does not model. */
+  tick() {
+    if (this.stopped) return;
+    this.ticks++;
+    if (this.wait > 0) {
+      this.wait--;
+      return;
+    }
+    for (let steps = 0; steps < 2e3; steps++) {
+      const ins = decodeAt2(this.bytes, this.pc);
+      if (!ins) {
+        this.stopped = { kind: "unknown", at: this.pc, byte: this.bytes[this.pc] };
+        return;
+      }
+      this.last = ins;
+      const name = ins.op.name;
+      this.pc = ins.next;
+      switch (name) {
+        case "playfram":
+          this.frameBase = ins.args[0];
+          this.setFrame();
+          break;
+        case "sethorpos":
+          this.pose.x = ins.args[0];
+          break;
+        case "setvertpos":
+          this.pose.y = ins.args[0];
+          break;
+        case "setpos":
+          this.pose.x = ins.args[0];
+          this.pose.y = ins.args[1];
+          break;
+        case "wait":
+          this.wait = Math.max(0, ins.args[0] - 1);
+          return;
+        case "waitrand": {
+          const [a2, b] = ins.args;
+          this.wait = Math.max(0, a2 + Math.floor(this.random() * (Math.max(a2, b) - a2 + 1)) - 1);
+          return;
+        }
+        case "goto":
+          this.pc = ins.args[0];
+          break;
+        case "call":
+          this.stack.push(this.pc);
+          this.pc = ins.args[0];
+          break;
+        case "return":
+          if (!this.stack.length) {
+            this.stopped = { kind: "end" };
+            return;
+          }
+          this.pc = this.stack.pop();
+          break;
+        case "end":
+          this.stopped = { kind: "end" };
+          return;
+        case "randcondjmp":
+          if (this.random() * 256 < ins.args[0]) this.pc = ins.args[1];
+          break;
+        case "setflipstate":
+          this.flipState = !!ins.args[0];
+          this.setFrame();
+          break;
+        case "turnccwise":
+          this.pose.direction -= ins.args[0];
+          this.setFrame();
+          break;
+        case "turncwise":
+          this.pose.direction += ins.args[0];
+          this.setFrame();
+          break;
+        case "turn1cwise":
+          this.pose.direction += 1;
+          this.setFrame();
+          break;
+        case "turnrand":
+          this.pose.direction += (this.random() < 0.5 ? -1 : 1) * ins.args[0];
+          this.setFrame();
+          break;
+        case "setfldirect":
+          this.pose.direction = ins.args[0];
+          this.setFrame();
+          break;
+        case "ignorerest":
+          this.stopped = { kind: "unmodelled", at: ins.at, name };
+          return;
+        default:
+          if (SKIPPED.has(name)) {
+            this.skipped.add(name);
+            break;
+          }
+          if (NO_BRANCH.has(name)) {
+            this.noBranch.add(name);
+            break;
+          }
+          this.stopped = { kind: "unmodelled", at: ins.at, name };
+          return;
+      }
+    }
+    this.stopped = { kind: "loop", at: this.pc };
+  }
+};
+
+// preview.ts
+var FRAME_MS = 42;
+var AnimPreview = class {
+  el;
+  session;
+  look;
+  image = -1;
+  anim = 0;
+  direction = 0;
+  runner = null;
+  grp = null;
+  timer = 0;
+  revision = -1;
+  canvas;
+  animPick;
+  facing;
+  title;
+  line;
+  notes;
+  playButton;
+  constructor(session, look) {
+    this.session = session;
+    this.look = look;
+    this.title = h("div", { className: "mx-dim" });
+    this.animPick = h("select", { title: t2("Animation"), onchange: () => {
+      this.anim = Number(this.animPick.value);
+      void this.restart();
+    } });
+    this.facing = h("input", { type: "range", min: "0", max: "31", value: "0", title: t2("Facing"), style: "width: 90px", oninput: () => {
+      this.direction = Number(this.facing.value);
+      void this.restart();
+    } });
+    this.playButton = button(t2("Play"), () => this.toggle());
+    this.canvas = h("canvas", { width: 64, height: 64, className: "mx-canvas" });
+    this.line = h("div", { className: "mx-mono mx-dim mx-preview-line" });
+    this.notes = h("div", { className: "mx-faint mx-preview-notes" });
+    this.el = h(
+      "div",
+      { className: "mx-preview" },
+      this.title,
+      h("div", { className: "mx-bar" }, this.animPick, this.facing, this.playButton, button(t2("Step"), () => this.step()), button(t2("Restart"), () => void this.restart())),
+      h("div", { className: "mx-stage" }, this.canvas),
+      this.line,
+      this.notes
+    );
+  }
+  /** The image shown, or -1. */
+  imageId() {
+    return this.image;
+  }
+  /** Show image `id` (an images.dat entry); null clears the preview. */
+  async show(id, anim) {
+    this.image = id ?? -1;
+    if (id === null) {
+      this.stop();
+      this.title.textContent = t2("No image chosen.");
+      clear(this.animPick);
+      this.draw();
+      return;
+    }
+    const found = await this.script();
+    clear(this.animPick);
+    const list = found ? animationsOf(found.anims) : [];
+    for (const a2 of list) this.animPick.append(h("option", { value: String(a2.index) }, a2.name));
+    const wanted = anim ? list.find((a2) => a2.name === anim) : list.find((a2) => a2.index === this.anim) ?? list[0];
+    this.anim = wanted?.index ?? 0;
+    this.animPick.value = String(this.anim);
+    await this.restart();
+  }
+  /** The image's iscript header, in the mod's iscript files as they are now (the game's when the mod has none). */
+  async script() {
+    const images = this.session.table("images");
+    if (!images || this.image < 0 || this.image >= images.count) return null;
+    const id = images.columns.iscript_id[this.image];
+    const files = [];
+    for (const doc of this.session.scripts.filter((d) => d.kind === "iscript")) {
+      const bytes = await this.session.readOver(doc.members[0]);
+      if (bytes) files.push({ member: doc.members[0], bytes });
+    }
+    return new ScriptIndex(files, images.columns.iscript_id).find(id);
+  }
+  async grpOf() {
+    const images = this.session.table("images"), tbl = this.session.data.strings.images;
+    if (!images || !tbl) return null;
+    const v = images.columns.grp_file[this.image];
+    const path = v && v <= tbl.length ? entryText(tbl[v - 1]) : "";
+    if (!path) return null;
+    const bytes = await this.session.readOver(gameName(`unit\\${path}`));
+    try {
+      return bytes ? decodeGrpImage(bytes) : null;
+    } catch {
+      return null;
+    }
+  }
+  /** Start the animation over (after a change of image, animation, facing, or the mod's files). */
+  async restart() {
+    const playing = this.timer !== 0;
+    this.stop();
+    this.revision = this.session.revision;
+    const images = this.session.table("images");
+    const found = await this.script();
+    this.grp = await this.grpOf();
+    const raw = images && this.image >= 0 ? images.columns.iscript_id[this.image] >>> 0 : -1;
+    const iscriptId = raw > 65535 ? `${raw & 65535} (${t2("file {n}", { n: raw >>> 16 })})` : String(raw);
+    const path = images && this.image >= 0 ? this.session.entryName("images", this.image) : "";
+    this.title.textContent = t2("Image {id} ({path}), iscript {script}", { id: this.image, path: path || "\u2014", script: found ? `${iscriptId} \xB7 ${found.member}` : iscriptId });
+    this.runner = null;
+    if (!found) {
+      this.say(t2("No iscript defines {id}.", { id: iscriptId }));
+      this.draw();
+      return;
+    }
+    const entry = found.anims[this.anim];
+    if (!entry) {
+      this.say(t2("This script has no {anim} animation.", { anim: ISCRIPT_ANIMS[this.anim] ?? String(this.anim) }));
+      this.draw();
+      return;
+    }
+    this.runner = new AnimationRunner(found.bytes, entry, { turns: !!images.columns.gfx_turns[this.image], direction: this.direction });
+    this.runner.tick();
+    this.draw();
+    if (playing) this.toggle();
+  }
+  /** Called when the mod changed: an edit to the script or the picture is played from the start. */
+  refresh() {
+    if (this.image >= 0 && this.revision !== this.session.revision && this.el.isConnected) void this.restart();
+  }
+  say(text) {
+    this.line.textContent = text;
+    this.notes.textContent = "";
+  }
+  step() {
+    if (!this.runner) return;
+    this.runner.tick();
+    this.draw();
+  }
+  toggle() {
+    if (this.timer) {
+      this.stop();
+      return;
+    }
+    if (!this.runner) return;
+    this.playButton.textContent = t2("Pause");
+    this.timer = window.setInterval(() => {
+      if (!this.el.isConnected) {
+        this.stop();
+        return;
+      }
+      this.runner?.tick();
+      this.draw();
+      if (this.runner?.stopped) this.stop();
+    }, FRAME_MS);
+  }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = 0;
+    this.playButton.textContent = t2("Play");
+  }
+  draw() {
+    const ctx = this.canvas.getContext("2d");
+    const look = this.look();
+    const r = this.runner, grp = this.grp;
+    if (!grp || !look) {
+      ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+      if (!grp && this.image >= 0) this.say(t2("The image's GRP is not there."));
+      return;
+    }
+    const scale = grp.width <= 96 ? 2 : 1;
+    if (this.canvas.width !== grp.width * scale || this.canvas.height !== grp.height * scale) {
+      this.canvas.width = grp.width * scale;
+      this.canvas.height = grp.height * scale;
+    }
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    if (!r) return;
+    const frame = r.pose.frame;
+    if (frame >= grp.frames.length) this.line.textContent = t2("Frame {frame} is past the GRP's {n} frames.", { frame, n: grp.frames.length });
+    else {
+      const pixels = frameRgba(grp, frame, look.palette, look.lut, r.pose.flip);
+      const off = new OffscreenCanvas(grp.width, grp.height);
+      off.getContext("2d").putImageData(new ImageData(pixels, grp.width, grp.height), 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(off, r.pose.x * scale, r.pose.y * scale, grp.width * scale, grp.height * scale);
+      this.line.textContent = t2("Game frame {tick} \xB7 GRP frame {frame}{flip} \xB7 facing {dir}", { tick: r.ticks, frame, flip: r.pose.flip ? t2(" (mirrored)") : "", dir: (r.pose.direction % 32 + 32) % 32 });
+    }
+    const notes = [];
+    if (r.skipped.size) notes.push(t2("Skipped (no picture of their own here): {names}.", { names: [...r.skipped].sort().join(", ") }));
+    if (r.noBranch.size) notes.push(t2(`Read the game's state, so taken as "no": {names}.`, { names: [...r.noBranch].sort().join(", ") }));
+    const s = r.stopped;
+    if (s?.kind === "end") notes.push(t2("The animation ended."));
+    else if (s?.kind === "unmodelled") notes.push(t2("Stopped at {name} (offset {at}): the preview does not model it. A running game shows the rest (Play, or Test Map).", { name: s.name, at: s.at }));
+    else if (s?.kind === "unknown") notes.push(t2("Stopped at byte {byte} (offset {at}), which is no opcode of 1.16.1: a plugin's own.", { byte: s.byte, at: s.at }));
+    else if (s?.kind === "loop") notes.push(t2("Stopped: the script runs on without a wait (offset {at}).", { at: s.at }));
+    this.notes.textContent = notes.join(" ");
+  }
+};
+
+// picturesView.ts
+var TEAM_NAMES = [msg2("Red"), msg2("Blue"), msg2("Teal"), msg2("Purple"), msg2("Orange"), msg2("Brown"), msg2("White"), msg2("Yellow")];
+var PicturesView = class {
+  el;
+  ctx;
+  look;
+  entries = [];
+  shown = [];
+  selected = null;
+  grp = null;
+  bytes = null;
+  frame = 0;
+  mode = "frames";
+  query = "";
+  onlyOwn = false;
+  revision = -1;
+  list;
+  count;
+  info;
+  stage;
+  modeBar;
+  preview;
+  constructor(ctx, look) {
+    this.ctx = ctx;
+    this.look = look;
+    this.preview = new AnimPreview(ctx.session, () => this.look.current());
+    this.list = h("div", { className: "mx-list mx-pics" });
+    this.count = h("div", { className: "mx-dim mx-count", style: "padding: 2px 6px" });
+    const search = h("input", { type: "search", placeholder: t2("Search paths"), style: "width: 100%", oninput: () => {
+      this.query = search.value;
+      this.filter();
+    } });
+    const own = h("input", { type: "checkbox", onchange: () => {
+      this.onlyOwn = own.checked;
+      this.filter();
+    } });
+    const palette = h(
+      "select",
+      { title: t2("Palette"), onchange: () => {
+        this.look.palette = palette.value;
+        void this.look.load().then(() => this.draw());
+      } },
+      ...PALETTES.map((p) => h("option", { value: p }, p))
+    );
+    palette.value = this.look.palette;
+    const team = h(
+      "select",
+      { title: t2("Team colour (tunit.pcx)"), onchange: () => {
+        this.look.team = Number(team.value);
+        this.draw();
+      } },
+      h("option", { value: "-1" }, t2("No team colour")),
+      ...Array.from({ length: 16 }, (_, i2) => h("option", { value: String(i2) }, TEAM_NAMES[i2] ? t2("Team colour: {name}", { name: translate2(TEAM_NAMES[i2]) }) : t2("Team colour: row {n}", { n: i2 })))
+    );
+    team.value = String(this.look.team);
+    this.modeBar = h("span", { className: "mx-bar", style: "padding: 0" });
+    this.info = h("div", { className: "mx-dim", style: "padding: 2px 6px; white-space: normal" });
+    this.stage = h("div", { className: "mx-stagewrap" });
+    this.stage.addEventListener("dragover", (e) => {
+      e.preventDefault();
+    });
+    this.stage.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const f = e.dataTransfer?.files[0];
+      if (f) void this.importFile(f);
+    });
+    this.el = h(
+      "div",
+      { className: "mx-pictures" },
+      h("div", { className: "mx-col" }, h("div", { className: "mx-bar" }, search), h("label", { className: "mx-dim", style: "padding: 0 6px" }, own, t2("Only the mod's own")), this.count, this.list),
+      h(
+        "div",
+        { className: "mx-col" },
+        h(
+          "div",
+          { className: "mx-bar" },
+          this.modeBar,
+          h("span", { className: "mx-sep" }),
+          palette,
+          team,
+          h("span", { className: "mx-sep" }),
+          button(t2("Import PNG\u2026"), () => void this.pickPng(), { title: t2("A sheet replaces every frame; a picture one frame in size replaces the frame shown") }),
+          button(t2("Export PNG"), () => void this.exportSheet())
+        ),
+        this.info,
+        this.stage
+      )
+    );
+    void this.look.load().then(() => this.refresh());
+  }
+  /** The list again (after an edit or a language change), keeping the choice. */
+  refresh() {
+    if (this.revision === this.ctx.session.revision && this.entries.length) {
+      this.preview.refresh();
+      return;
+    }
+    this.revision = this.ctx.session.revision;
+    this.entries = pictureList(this.ctx.session, this.ctx.gameGrps());
+    const keep = this.selected?.member;
+    this.filter();
+    const again = keep ? this.entries.find((e) => e.member === keep) : this.shown[0];
+    if (again) void this.choose(again, true);
+  }
+  filter() {
+    const q = this.query.trim().toLowerCase();
+    this.shown = this.entries.filter((e) => (!this.onlyOwn || e.own) && (!q || e.member.includes(q)));
+    const own = this.entries.filter((e) => e.own).length;
+    this.count.textContent = t2("{own} GRPs in the mod, {game} of the game's; {shown} shown", { own: num2(own), game: num2(this.entries.length - own), shown: num2(this.shown.length) });
+    clear(this.list);
+    for (const e of this.shown.slice(0, 3e3)) {
+      this.list.append(h(
+        "div",
+        { className: `item${e === this.selected ? " on" : ""}`, title: e.member, dataset: { member: e.member }, onclick: () => void this.choose(e) },
+        e.member.replace(/^unit\\/, ""),
+        e.own ? null : h("span", { className: "tag" }, t2("the game's")),
+        e.images.length ? h("span", { className: "tag" }, `\xB7 ${num2(e.images.length)}`) : null
+      ));
+    }
+    if (this.shown.length > 3e3) this.list.append(h("div", { className: "mx-faint", style: "padding: 3px 8px" }, t2("and {n} more: search to find them", { n: num2(this.shown.length - 3e3) })));
+  }
+  /** Show a GRP; `keepFrame` after an edit of the same one. */
+  async choose(e, keepFrame = false) {
+    const same3 = this.selected?.member === e.member;
+    this.selected = e;
+    for (const row of this.list.querySelectorAll(".item")) row.classList.toggle("on", row.dataset.member === e.member);
+    this.bytes = await this.ctx.session.readOver(e.member);
+    this.grp = null;
+    try {
+      this.grp = this.bytes ? decodeGrpImage(this.bytes) : null;
+    } catch (err2) {
+      this.info.textContent = t2("{file} is not read as a GRP: {error}", { file: e.member, error: err2.message });
+    }
+    if (!(same3 && keepFrame)) this.frame = 0;
+    if (this.grp && this.frame >= this.grp.frames.length) this.frame = 0;
+    if (this.mode === "animation") await this.preview.show(e.images[0] ?? null);
+    this.draw();
+  }
+  /** Show the GRP an image draws, in the animation view, playing `anim`. */
+  async showImage(image, anim) {
+    const e = this.entries.find((x3) => x3.images.includes(image));
+    if (!e) return;
+    this.mode = "animation";
+    await this.choose(e);
+    await this.preview.show(image, anim);
+    this.draw();
+  }
+  drawModes() {
+    clear(this.modeBar);
+    const m = (id, label) => h("button", { type: "button", className: `mx-tab${this.mode === id ? " on" : ""}`, dataset: { mode: id }, onclick: () => {
+      this.mode = id;
+      if (id === "animation") void this.preview.show(this.selected?.images[0] ?? null);
+      this.draw();
+    } }, label);
+    this.modeBar.append(m("frames", t2("Frames")), m("sheet", t2("Sheet")), m("animation", t2("Animation")));
+  }
+  draw() {
+    this.drawModes();
+    clear(this.stage);
+    const e = this.selected, grp = this.grp, look = this.look.current();
+    if (!e) {
+      this.info.textContent = t2("Choose a GRP.");
+      return;
+    }
+    if (!grp) {
+      if (!this.bytes) this.info.textContent = t2("{file} is in neither the mod nor the game's files here.", { file: e.member });
+      return;
+    }
+    if (!look) {
+      this.info.textContent = t2("The palette {name} is in neither the mod nor the game's files here.", { name: this.look.palette });
+      return;
+    }
+    clear(this.info);
+    this.info.append(`${e.member} \xB7 ${grp.width} \xD7 ${grp.height} \xB7 ${t2("{n, plural, one {{count} frame} other {{count} frames}}", { n: grp.frames.length, count: num2(grp.frames.length) })} \xB7 ${sizeText(this.bytes.length)}${e.own ? "" : ` \xB7 ${t2("the game's")}`} \xB7 `);
+    if (e.images.length) {
+      this.info.append(t2("used by "));
+      e.images.slice(0, 12).forEach((id, i2) => {
+        if (i2) this.info.append(", ");
+        this.info.append(h("a", { className: "mx-link", onclick: () => this.ctx.go("images", id) }, t2("image {id}", { id })));
+      });
+      if (e.images.length > 12) this.info.append(` ${t2("and {n} more", { n: num2(e.images.length - 12) })}`);
+    } else this.info.append(t2("no image draws it"));
+    if (this.mode === "animation") {
+      const shown = this.preview.imageId();
+      const choices = e.images.length > 200 ? [.../* @__PURE__ */ new Set([...shown >= 0 ? [shown] : [], ...e.images.slice(0, 200)])] : e.images;
+      const pick = h("select", { onchange: () => void this.preview.show(Number(pick.value)) }, ...choices.map((id) => h("option", { value: String(id) }, t2("image {id}", { id }))));
+      if (shown >= 0) pick.value = String(shown);
+      if (!e.images.length) {
+        this.stage.append(h("p", { className: "mx-dim" }, t2("No image draws this GRP, so it has no script to play.")));
+        return;
+      }
+      this.stage.append(h("div", { className: "mx-bar" }, t2("Image"), pick), this.preview.el);
+      this.preview.refresh();
+      return;
+    }
+    const canvas = h("canvas", { className: "mx-canvas" });
+    if (this.mode === "sheet") {
+      const sheet = sheetRgba(grp, look.palette, look.lut);
+      canvas.width = sheet.width;
+      canvas.height = sheet.height;
+      canvas.getContext("2d").putImageData(new ImageData(sheet.rgba, sheet.width, sheet.height), 0, 0);
+      this.stage.append(h("div", { className: "mx-sheet" }, canvas));
+      return;
+    }
+    const scale = grp.width <= 128 ? 3 : grp.width <= 256 ? 2 : 1;
+    canvas.width = grp.width * scale;
+    canvas.height = grp.height * scale;
+    const off = new OffscreenCanvas(grp.width, grp.height);
+    off.getContext("2d").putImageData(new ImageData(frameRgba(grp, this.frame, look.palette, look.lut), grp.width, grp.height), 0, 0);
+    const c22 = canvas.getContext("2d");
+    c22.imageSmoothingEnabled = false;
+    c22.drawImage(off, 0, 0, canvas.width, canvas.height);
+    const slider = h("input", { type: "range", min: "0", max: String(grp.frames.length - 1), value: String(this.frame), style: "width: 240px", oninput: () => {
+      this.frame = Number(slider.value);
+      this.draw();
+    } });
+    const f = grp.frames[this.frame];
+    this.stage.append(
+      h(
+        "div",
+        { className: "mx-bar" },
+        button("\u2039", () => {
+          this.frame = (this.frame + grp.frames.length - 1) % grp.frames.length;
+          this.draw();
+        }),
+        slider,
+        button("\u203A", () => {
+          this.frame = (this.frame + 1) % grp.frames.length;
+          this.draw();
+        }),
+        h("span", { className: "mx-dim mx-frameinfo" }, t2("Frame {i} of {n}: {w} \xD7 {h} at {x}, {y}", { i: this.frame, n: grp.frames.length, w: f.width, h: f.height, x: f.x, y: f.y }))
+      ),
+      h("div", { className: "mx-stage" }, canvas)
+    );
+  }
+  async pickPng() {
+    const files = await this.ctx.api.ui.pickFiles({ accept: ".png,image/png", multiple: false });
+    if (files[0]) await this.importFile(files[0]);
+  }
+  /** A PNG brought in: what it would change, shown first; used when the person says so. */
+  async importFile(file) {
+    const e = this.selected, grp = this.grp, palette = this.look.named();
+    if (!e || !grp || !palette) {
+      this.ctx.say(t2("Choose a GRP to import over first."));
+      return;
+    }
+    let plan;
+    try {
+      plan = await importPng(grp, new Uint8Array(await file.arrayBuffer()), palette, this.frame);
+    } catch (err2) {
+      this.ctx.say(t2("{file} is not read as a PNG: {error}", { file: file.name, error: err2.message }));
+      return;
+    }
+    if ("refused" in plan) {
+      this.ctx.say(plan.refused === "frames" ? t2("{file} is {w} \xD7 {h}: fewer cells than the GRP's {n} frames of {fw} \xD7 {fh}.", { file: file.name, w: plan.width, h: plan.height, n: grp.frames.length, fw: grp.width, fh: grp.height }) : t2("{file} is {w} \xD7 {h}: neither one frame ({fw} \xD7 {fh}) nor a sheet of them.", { file: file.name, w: plan.width, h: plan.height, fw: grp.width, fh: grp.height }));
+      return;
+    }
+    const ok = await this.reportDialog(file.name, plan, e.member);
+    if (!ok) {
+      this.ctx.say(t2("Not imported."));
+      return;
+    }
+    this.ctx.session.setMember(e.member, plan.grp);
+    this.ctx.say(plan.kind === "frame" ? t2("Frame {i} of {file} replaced from {png}.", { i: this.frame, file: e.member, png: file.name }) : t2("{file}: every frame replaced from {png}.", { file: e.member, png: file.name }));
+  }
+  reportDialog(name, plan, member) {
+    const r = plan.report;
+    const pal = this.look.current().palette;
+    const swatch = (rgb) => h("span", { className: "mx-swatch", style: `background: ${rgb}` });
+    const index = (i2) => `rgb(${pal[i2 * 4]}, ${pal[i2 * 4 + 1]}, ${pal[i2 * 4 + 2]})`;
+    return new Promise((resolve) => {
+      let answered = false;
+      const answer = (v) => {
+        if (!answered) {
+          answered = true;
+          resolve(v);
+        }
+      };
+      this.ctx.api.ui.dialog({
+        title: t2("Import {png}", { png: name }),
+        size: "md",
+        mount: (body) => {
+          const root = h("div", { className: "mx mx-dlg mx-report" });
+          body.append(root);
+          root.append(h("p", null, plan.kind === "frame" ? t2("It replaces frame {i} of {file}.", { i: this.frame, file: member }) : t2("It replaces all {n} frames of {file}.", { n: plan.image.frames.length, file: member })));
+          if (r.paletteMismatch) root.append(h("p", { className: "mx-warn" }, t2("The sheet says it was drawn in the palette {was}; it is read in {now}.", { was: r.paletteMismatch, now: this.look.palette })));
+          if (!r.coloursLost.length && !r.pixelsAlphaRounded) root.append(h("p", { className: "mx-ok" }, t2("Every pixel is a colour of the palette: nothing is lost.")));
+          else {
+            root.append(h("p", { className: "mx-warn" }, t2("{n} colours are not in the palette {palette}: {pixels} pixels take the nearest colour it has.", { n: num2(r.coloursLost.length), palette: this.look.palette, pixels: num2(r.pixelsChanged) })));
+            if (r.pixelsAlphaRounded) root.append(h("p", { className: "mx-warn" }, t2("{n} pixels were partly transparent and are now either opaque or transparent.", { n: num2(r.pixelsAlphaRounded) })));
+            const list = h("div", { className: "mx-lost" });
+            for (const c3 of [...r.coloursLost].sort((a2, b) => b.pixels - a2.pixels).slice(0, 40)) list.append(h("div", null, swatch(c3.colour), ` ${c3.colour} \u2192 `, swatch(index(c3.became)), ` ${t2("index {i}", { i: c3.became })} \xB7 ${t2("{n} pixels", { n: num2(c3.pixels) })}`));
+            if (r.coloursLost.length > 40) list.append(h("div", { className: "mx-faint" }, t2("and {n} more", { n: num2(r.coloursLost.length - 40) })));
+            root.append(list);
+          }
+          return () => answer(false);
+        },
+        buttons: [{ label: t2("Cancel"), run: () => answer(false) }, { label: t2("Use It"), primary: true, run: () => answer(true) }]
+      });
+    });
+  }
+  async exportSheet() {
+    const e = this.selected, palette = this.look.named();
+    if (!e || !this.bytes || !palette) return;
+    try {
+      const png = await exportPng(this.bytes, palette, e.member);
+      const name = `${e.member.split("\\").pop().replace(/\.grp$/i, "")}.png`;
+      const where = await this.ctx.api.ui.saveFile(png, name);
+      if (where) this.ctx.say(t2("Saved {file}: the sheet in the palette {palette}; import it back to change the picture.", { file: where.fileName, palette: palette.name }));
+    } catch (err2) {
+      this.ctx.say(t2("Not saved: {error}", { error: err2.message }));
+    }
+  }
+};
+
 // languages.ts
 var PYICE = "pyice";
 var PYAI = "pyai";
+var PYLO = "pylo";
 var ISCRIPT_IDS = {
   imgol: ["image"],
   imgul: ["image"],
@@ -9746,6 +10866,19 @@ function aiGrammar() {
     }
   };
 }
+function loGrammar() {
+  return {
+    defaultToken: "",
+    tokenizer: {
+      root: [
+        [/#.*$/, "comment"],
+        [/^\s*Frame:/, "keyword"],
+        [/-?\d+\b/, "number"],
+        [/[(),]/, "delimiter"]
+      ]
+    }
+  };
+}
 function labelsOf(text, language) {
   const out = [];
   const re = language === PYICE ? /^([A-Za-z_][\w]*):\s*(#.*)?$/ : /^\s*--([^-\s]+)--\s*$/;
@@ -9779,6 +10912,9 @@ function registerLanguages(monaco, names) {
   const L = monaco.languages;
   L.register({ id: PYICE, extensions: [".iscript"], aliases: ["PyICE iscript"] });
   L.register({ id: PYAI, extensions: [".pyai"], aliases: ["PyAI script"] });
+  L.register({ id: PYLO, aliases: ["PyLO overlays"] });
+  L.setMonarchTokensProvider(PYLO, loGrammar());
+  L.setLanguageConfiguration(PYLO, { comments: { lineComment: "#" }, brackets: [["(", ")"]] });
   L.setMonarchTokensProvider(PYICE, iscriptGrammar());
   L.setMonarchTokensProvider(PYAI, aiGrammar());
   L.setLanguageConfiguration(PYICE, { comments: { lineComment: "#" } });
@@ -9898,21 +11034,44 @@ var ScriptsView = class {
   open = null;
   timer = 0;
   dist;
-  constructor(ctx, dist = DEFAULT_DIST) {
+  kinds;
+  preview;
+  query = "";
+  cursorTimer = 0;
+  /** `kinds`: the scripts this tab lists (the Scripts tab's iscript and AI, the Overlays tab's overlays). */
+  constructor(ctx, dist = DEFAULT_DIST, kinds = ["iscript", "ai"], look) {
     this.ctx = ctx;
     this.dist = dist;
+    this.kinds = kinds;
     current = ctx.session;
     this.list = h("div", { className: "mx-list" });
     this.host = h("div", { className: "mx-editor" });
-    this.say = h("div", { className: "mx-say mx-dim" }, t2("Choose a script."));
-    this.el = h("div", { className: "mx-scripts" }, this.list, h("div", { className: "mx-col" }, this.host, this.say));
+    this.say = h("div", { className: "mx-say mx-dim" }, kinds.includes("overlay") ? t2("Choose an overlay file.") : t2("Choose a script."));
+    this.preview = look && kinds.includes("iscript") ? new AnimPreview(ctx.session, () => look.current()) : null;
+    const search = h("input", { type: "search", placeholder: t2("Search"), style: "width: 100%", oninput: () => {
+      this.query = search.value.toLowerCase();
+      this.drawList();
+    } });
+    const many = this.docs().length > 20;
+    this.el = h(
+      "div",
+      { className: `mx-scripts${this.preview ? " with-preview" : ""}` },
+      h("div", { className: "mx-col" }, many ? h("div", { className: "mx-bar" }, search) : null, this.list),
+      h("div", { className: "mx-col" }, this.host, this.say),
+      this.preview ? h("div", { className: "mx-side" }, h("h4", null, t2("Preview")), h("p", { className: "mx-faint" }, t2("The animation of the script at the cursor, for the first image that uses it.")), this.preview.el) : null
+    );
+    if (look) void look.load();
     this.drawList();
+  }
+  docs() {
+    return this.ctx.session.scripts.filter((d) => this.kinds.includes(d.kind));
   }
   drawList() {
     clear(this.list);
     const errors = new Set(this.ctx.session.scriptErrors().map((e) => e.doc.id));
-    if (!this.ctx.session.scripts.length) this.list.append(h("p", { className: "mx-dim", style: "padding: 6px" }, t2("The mod has no animation or AI scripts.")));
-    for (const doc of this.ctx.session.scripts) {
+    const docs = this.docs();
+    if (!docs.length) this.list.append(h("p", { className: "mx-dim", style: "padding: 6px" }, this.kinds.includes("overlay") ? t2("The mod has no overlay files.") : t2("The mod has no animation or AI scripts.")));
+    for (const doc of docs.filter((d) => !this.query || d.label.toLowerCase().includes(this.query))) {
       this.list.append(h(
         "div",
         { className: `item${doc === this.open ? " on" : ""}`, title: doc.members.join(", "), dataset: { id: doc.id }, onclick: () => void this.show(doc.id) },
@@ -9942,7 +11101,7 @@ var ScriptsView = class {
     if (!monaco) return;
     let model = this.models.get(id);
     if (!model) {
-      model = monaco.editor.createModel(state.text, doc.kind === "ai" ? PYAI : PYICE, monaco.Uri.parse(`mods:///${doc.label}`));
+      model = monaco.editor.createModel(state.text, doc.kind === "ai" ? PYAI : doc.kind === "overlay" ? PYLO : PYICE, monaco.Uri.parse(`mods:///${doc.label}`));
       model.onDidChangeContent(() => this.changed(doc, model));
       this.models.set(id, model);
     }
@@ -9973,6 +11132,10 @@ var ScriptsView = class {
       registerLanguages(monaco, () => current ? namesOf2(current) : null);
       this.monaco = monaco;
       this.editor = monaco.editor.create(this.host, { model: null, theme: THEME, automaticLayout: true, minimap: { enabled: false }, fontSize: 12, tabSize: 8, insertSpaces: false, renderWhitespace: "none", scrollBeyondLastLine: false, wordBasedSuggestions: "off" });
+      this.editor.onDidChangeCursorPosition(() => {
+        clearTimeout(this.cursorTimer);
+        this.cursorTimer = window.setTimeout(() => this.follow(), 250);
+      });
       return monaco;
     } catch (err2) {
       this.say.className = "mx-say mx-danger";
@@ -9988,8 +11151,50 @@ var ScriptsView = class {
       await this.ctx.session.setScriptText(doc.id, model.getValue());
       if (this.open === doc) this.mark(doc, model);
       this.drawList();
+      this.preview?.refresh();
     }, 350);
   }
+  /**
+   * The preview follows the cursor: the header above it names the iscript id, and the first image that plays it is
+   * shown — an image whose id is this file's (a mod with several iscript files picks the file by the id's high word).
+   */
+  follow() {
+    const model = this.editor?.getModel();
+    const doc = this.open;
+    if (!this.preview || !model || doc?.kind !== "iscript") return;
+    const line = this.editor.getPosition()?.lineNumber ?? 1;
+    let id = -1;
+    for (let l = line; l >= 1 && id < 0; l--) {
+      const m = /^IsId\s+(\d+)/.exec(model.getLineContent(l));
+      if (m) id = Number(m[1]);
+    }
+    if (id < 0) return;
+    void (async () => {
+      const images = this.ctx.session.table("images");
+      if (!images) return;
+      if (!this.index || this.indexAt !== this.ctx.session.revision) {
+        const files = [];
+        for (const d of this.ctx.session.scripts.filter((x3) => x3.kind === "iscript")) {
+          const b = await this.ctx.session.readOver(d.members[0]);
+          if (b) files.push({ member: d.members[0], bytes: b });
+        }
+        this.index = new ScriptIndex(files, images.columns.iscript_id);
+        this.indexAt = this.ctx.session.revision;
+      }
+      let image = -1;
+      for (let i2 = 0; i2 < images.count && image < 0; i2++) {
+        const v = images.columns.iscript_id[i2] >>> 0;
+        if ((v & 65535) === id && this.index.find(v)?.member === doc.members[0]) image = i2;
+      }
+      if (image !== this.shownImage) {
+        this.shownImage = image;
+        await this.preview.show(image >= 0 ? image : null);
+      }
+    })();
+  }
+  index = null;
+  indexAt = -1;
+  shownImage = -2;
   /** The assembler's verdict, on the line it named and under the editor. */
   async mark(doc, model) {
     const monaco = this.monaco;
@@ -10009,10 +11214,349 @@ var ScriptsView = class {
   }
   dispose() {
     clearTimeout(this.timer);
+    clearTimeout(this.cursorTimer);
+    this.preview?.stop();
     this.editor?.dispose();
     for (const m of this.models.values()) m.dispose();
     this.models.clear();
     if (current === this.ctx.session) current = null;
+  }
+};
+
+// wav.ts
+var GAME_WAV = { sampleRate: 22050, channels: 1, bits: 16 };
+function decodePcmWav(bytes) {
+  const info = parseWavHeader(bytes);
+  if (!info || info.format !== 1 && info.format !== 3) return null;
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const start = info.dataOffset, size = info.dataLength;
+  const width = info.bitsPerSample / 8, n = info.channels;
+  const frames = Math.floor(size / (width * n));
+  const float = info.format === 3;
+  const channels = Array.from({ length: n }, () => new Float32Array(frames));
+  for (let f = 0; f < frames; f++) {
+    for (let c3 = 0; c3 < n; c3++) {
+      const o = start + (f * n + c3) * width;
+      let s;
+      if (float && width === 4) s = v.getFloat32(o, true);
+      else if (width === 1) s = (bytes[o] - 128) / 128;
+      else if (width === 2) s = v.getInt16(o, true) / 32768;
+      else if (width === 3) s = ((bytes[o] | bytes[o + 1] << 8 | bytes[o + 2] << 16) << 8 >> 8) / 8388608;
+      else if (width === 4) s = v.getInt32(o, true) / 2147483648;
+      else return null;
+      channels[c3][f] = s;
+    }
+  }
+  return { sampleRate: info.sampleRate, channels };
+}
+function resample(pcm, target) {
+  const mono = pcm.channels.length === 1 ? pcm.channels[0] : null;
+  const src = target.channels === 1 ? [mono ?? pcm.channels[0].map((_, i2) => pcm.channels.reduce((sum, ch3) => sum + ch3[i2], 0) / pcm.channels.length)] : [pcm.channels[0], pcm.channels[1] ?? pcm.channels[0]];
+  if (pcm.sampleRate === target.sampleRate) return src.map((c3) => c3.slice());
+  const ratio = pcm.sampleRate / target.sampleRate;
+  const frames = Math.max(1, Math.round(src[0].length / ratio));
+  return src.map((c3) => {
+    const out = new Float32Array(frames);
+    for (let i2 = 0; i2 < frames; i2++) {
+      const x3 = i2 * ratio, j = Math.floor(x3), t3 = x3 - j;
+      out[i2] = (c3[j] ?? 0) * (1 - t3) + (c3[Math.min(j + 1, c3.length - 1)] ?? 0) * t3;
+    }
+    return out;
+  });
+}
+function encodeWav(channels, sampleRate, bits2) {
+  const n = channels.length, frames = channels[0]?.length ?? 0, width = bits2 / 8;
+  const data = frames * n * width;
+  const out = new Uint8Array(44 + data + (data & 1));
+  const v = new DataView(out.buffer);
+  const tag2 = (at, s) => {
+    for (let i2 = 0; i2 < 4; i2++) out[at + i2] = s.charCodeAt(i2);
+  };
+  tag2(0, "RIFF");
+  v.setUint32(4, out.length - 8, true);
+  tag2(8, "WAVE");
+  tag2(12, "fmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, n, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * n * width, true);
+  v.setUint16(32, n * width, true);
+  v.setUint16(34, bits2, true);
+  tag2(36, "data");
+  v.setUint32(40, data, true);
+  let o = 44;
+  for (let f = 0; f < frames; f++) {
+    for (let c3 = 0; c3 < n; c3++) {
+      const s = Math.max(-1, Math.min(1, channels[c3][f]));
+      if (bits2 === 16) {
+        v.setInt16(o, Math.round(s < 0 ? s * 32768 : s * 32767), true);
+        o += 2;
+      } else {
+        out[o] = Math.round(s * 127 + 128);
+        o += 1;
+      }
+    }
+  }
+  return out;
+}
+async function convertToWav(bytes, target, decode) {
+  const info = parseWavHeader(bytes);
+  if (info && info.format === 1 && info.sampleRate === target.sampleRate && info.channels === target.channels && info.bitsPerSample === target.bits) {
+    const pcm2 = decodePcmWav(bytes);
+    return { bytes, converted: false, seconds: pcm2 ? pcm2.channels[0].length / pcm2.sampleRate : 0 };
+  }
+  const pcm = decodePcmWav(bytes) ?? (decode ? await decode(bytes) : null);
+  if (!pcm) throw new Error("not a sound this page can read");
+  return { bytes: encodeWav(resample(pcm, target), target.sampleRate, target.bits), converted: true, seconds: pcm.channels[0].length / pcm.sampleRate };
+}
+async function browserDecode(bytes) {
+  const ctx = new OfflineAudioContext(1, 1, 44100);
+  const buffer = await ctx.decodeAudioData(bytes.slice().buffer);
+  return { sampleRate: buffer.sampleRate, channels: Array.from({ length: buffer.numberOfChannels }, (_, c3) => buffer.getChannelData(c3).slice()) };
+}
+
+// soundsView.ts
+var ROW = 22;
+var SoundsView = class {
+  el;
+  ctx;
+  ids = [];
+  query = "";
+  all = false;
+  selected = -1;
+  grid;
+  sizer;
+  rows;
+  side;
+  count;
+  drawn = { from: -1, to: -1, revision: -1 };
+  audio = null;
+  playing = null;
+  recorder = null;
+  constructor(ctx) {
+    this.ctx = ctx;
+    const search = h("input", { type: "search", placeholder: t2("Search files and row numbers"), style: "width: 220px", oninput: () => {
+      this.query = search.value;
+      this.filter();
+    } });
+    const all = h("input", { type: "checkbox", onchange: () => {
+      this.all = all.checked;
+      this.filter();
+    } });
+    this.count = h("span", { className: "mx-dim mx-count" });
+    this.rows = h("div");
+    this.sizer = h("div", { style: "position: relative" }, this.rows);
+    this.grid = h("div", { className: "mx-grid", onscroll: () => this.paint() }, this.sizer);
+    this.side = h("div", { className: "mx-side" });
+    this.side.addEventListener("dragover", (e) => e.preventDefault());
+    this.side.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const f = e.dataTransfer?.files[0];
+      if (f) void this.replace(f);
+    });
+    this.el = h(
+      "div",
+      { className: "mx-split" },
+      h("div", { className: "mx-col" }, h("div", { className: "mx-bar" }, search, h("label", { className: "mx-dim" }, all, t2("Rows with no file too")), this.count), this.grid),
+      this.side
+    );
+    new ResizeObserver(() => this.paint()).observe(this.grid);
+    this.filter();
+  }
+  /** The file a row plays (`sound\…`), or "" for none. */
+  fileOf(id) {
+    const sfx = this.ctx.session.table("sfxdata"), tbl = this.ctx.session.data.strings.sfxdata;
+    if (!sfx || !tbl) return "";
+    const v = sfx.columns.sound_file[id];
+    const path = v && v <= tbl.length ? entryText(tbl[v - 1]) : "";
+    return path ? `sound\\${path}` : "";
+  }
+  refresh() {
+    this.filter(true);
+  }
+  filter(keep = false) {
+    const sfx = this.ctx.session.table("sfxdata");
+    const q = this.query.trim().toLowerCase();
+    const n = /^#?\d+$/.test(q) ? Number(q.replace("#", "")) : null;
+    this.ids = [];
+    let withFile = 0;
+    for (let id = 0; id < (sfx?.count ?? 0); id++) {
+      const f = this.fileOf(id);
+      if (f) withFile++;
+      if (q ? id === n || f.toLowerCase().includes(q) : this.all || f) this.ids.push(id);
+    }
+    this.count.textContent = sfx ? t2("{shown} shown; {files} of {rows} rows play a file", { shown: num2(this.ids.length), files: num2(withFile), rows: num2(sfx.count) }) : t2("Neither the mod nor the game here has a sound table.");
+    this.sizer.style.height = `${(this.ids.length + 1) * ROW}px`;
+    if (!keep) this.grid.scrollTop = 0;
+    this.drawn.revision = -1;
+    this.paint();
+    this.drawSide();
+  }
+  paint() {
+    if (!this.el.isConnected) return;
+    const from = Math.max(0, Math.floor(this.grid.scrollTop / ROW) - 9);
+    const to = Math.min(this.ids.length, Math.ceil((this.grid.scrollTop + this.grid.clientHeight) / ROW) + 8);
+    if (from === this.drawn.from && to === this.drawn.to && this.drawn.revision === this.ctx.session.revision) return;
+    this.drawn = { from, to, revision: this.ctx.session.revision };
+    clear(this.rows);
+    const cols = "grid-template-columns: 64px minmax(0, 1fr) 80px";
+    this.rows.append(h("div", { className: "mx-row head", style: cols }, h("span", { className: "mx-cell num" }, t2("Row")), h("span", { className: "mx-cell" }, t2("File")), h("span", { className: "mx-cell" }, t2("In the mod"))));
+    this.rows.append(h("div", { style: `height: ${from * ROW}px` }));
+    for (let k = from; k < to; k++) {
+      const id = this.ids[k], file = this.fileOf(id);
+      const own = file && this.ctx.session.has(file);
+      this.rows.append(h(
+        "div",
+        { className: `mx-row${id === this.selected ? " on" : ""}`, style: cols, dataset: { id: String(id) }, onclick: () => this.select(id), ondblclick: () => void this.play(id) },
+        h("span", { className: "mx-cell num mx-mono" }, String(id)),
+        h("span", { className: "mx-cell mx-mono", title: file }, file.replace(/^sound\\/, "") || h("span", { className: "mx-faint" }, "\u2014")),
+        h("span", { className: "mx-cell mx-dim" }, file ? own ? t2("yes") : t2("the game's") : "")
+      ));
+    }
+  }
+  select(id) {
+    this.selected = id;
+    for (const r of this.rows.querySelectorAll(".mx-row[data-id]")) r.classList.toggle("on", r.dataset.id === String(id));
+    this.drawSide();
+  }
+  drawSide() {
+    clear(this.side);
+    const id = this.selected;
+    if (id < 0) {
+      this.side.append(h("p", { className: "mx-dim" }, t2("Choose a row to play its file or replace it. Double-click a row to play it.")));
+      return;
+    }
+    const file = this.fileOf(id);
+    this.side.append(h("h4", null, t2("Sound {id}", { id })));
+    if (!file) {
+      this.side.append(h("p", { className: "mx-dim" }, t2("This row plays no file.")));
+      return;
+    }
+    const info = h("p", { className: "mx-dim mx-soundinfo" }, file);
+    const pick = h("input", { type: "file", accept: "audio/*,.wav,.ogg,.mp3,.flac,.m4a,.webm", style: "display: none" });
+    pick.addEventListener("change", () => {
+      const f = pick.files?.[0];
+      if (f) void this.replace(f);
+      pick.value = "";
+    });
+    const rec = button(this.recorder ? t2("Stop Recording") : t2("Record\u2026"), () => void this.record());
+    this.side.append(
+      info,
+      h("div", { className: "mx-bar" }, button(t2("Play"), () => void this.play(id), { primary: true }), button(t2("Stop"), () => this.stop())),
+      h("div", { className: "mx-bar" }, button(t2("Replace\u2026"), () => pick.click(), { title: t2("A WAV, or any sound the browser plays; drop one here too") }), rec, button(t2("Save WAV\u2026"), () => void this.save(file))),
+      h("p", { className: "mx-faint" }, t2("A replacement is converted to 22050 Hz, 16-bit, mono (the game's own) unless it is one already.")),
+      pick
+    );
+    void this.ctx.session.readOver(file).then((bytes) => {
+      const w = bytes ? parseWavHeader(bytes) : null;
+      info.textContent = w ? `${file} \xB7 ${t2("{rate} Hz \xB7 {bits}-bit \xB7 {ch}", { rate: num2(w.sampleRate), bits: w.bitsPerSample, ch: w.channels === 1 ? t2("mono") : t2("stereo") })} \xB7 ${(w.dataLength / (w.sampleRate * w.channels * (w.bitsPerSample / 8) || 1)).toFixed(2)} s \xB7 ${sizeText(bytes.length)}` : bytes ? `${file} \xB7 ${sizeText(bytes.length)}` : t2("{file} is in neither the mod nor the game's files here.", { file });
+    });
+  }
+  /** Plays a row's file (the page's audio starts on this click). */
+  async play(id) {
+    const file = this.fileOf(id);
+    if (!file) return;
+    this.stop();
+    const bytes = await this.ctx.session.readOver(file);
+    if (!bytes) {
+      this.ctx.say(t2("{file} is in neither the mod nor the game's files here.", { file }));
+      return;
+    }
+    this.audio ??= new AudioContext();
+    try {
+      const pcm = decodePcmWav(bytes);
+      let buffer;
+      if (pcm) {
+        buffer = this.audio.createBuffer(pcm.channels.length, Math.max(1, pcm.channels[0].length), pcm.sampleRate);
+        pcm.channels.forEach((c3, i2) => buffer.copyToChannel(c3, i2));
+      } else buffer = await this.audio.decodeAudioData(bytes.slice().buffer);
+      const source = this.audio.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.audio.destination);
+      source.onended = () => {
+        if (this.playing === source) this.playing = null;
+      };
+      source.start();
+      this.playing = source;
+      this.ctx.say(t2("Playing {file} ({s} s).", { file, s: buffer.duration.toFixed(2) }));
+    } catch (err2) {
+      this.ctx.say(t2("{file} does not play here: {error}", { file, error: err2.message }));
+    }
+  }
+  stop() {
+    try {
+      this.playing?.stop();
+    } catch {
+    }
+    this.playing = null;
+  }
+  /** A sound brought in for the selected row's file. */
+  async replace(file) {
+    const target = this.fileOf(this.selected);
+    if (!target) return;
+    try {
+      const out = await convertToWav(new Uint8Array(await file.arrayBuffer()), GAME_WAV, browserDecode);
+      this.ctx.session.setMember(gameName(target), out.bytes);
+      const sharing = this.rowsPlaying(target).length;
+      this.ctx.say(t2("{file} replaced by {name} ({s} s{converted}){shared}.", {
+        file: target,
+        name: file.name ?? t2("the recording"),
+        s: out.seconds.toFixed(2),
+        converted: out.converted ? t2(", converted to 22050 Hz, 16-bit, mono") : "",
+        shared: sharing > 1 ? t2("; {n} rows play it", { n: sharing }) : ""
+      }));
+      this.drawSide();
+    } catch (err2) {
+      this.ctx.say(t2("{name} is not a sound this page can read: {error}", { name: file.name ?? "", error: err2.message }));
+    }
+  }
+  rowsPlaying(file) {
+    const sfx = this.ctx.session.table("sfxdata");
+    const out = [];
+    for (let id = 0; id < (sfx?.count ?? 0); id++) if (this.fileOf(id) === file) out.push(id);
+    return out;
+  }
+  /** Records from the microphone; pressed again, stops and uses the recording for the selected row. */
+  async record() {
+    if (this.recorder) {
+      this.recorder.stop();
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err2) {
+      this.ctx.say(t2("The microphone is not available: {error}", { error: err2.message }));
+      return;
+    }
+    const chunks = [];
+    const recorder = new MediaRecorder(stream);
+    this.recorder = recorder;
+    const started = performance.now();
+    recorder.ondataavailable = (e) => {
+      if (e.data.size) chunks.push(e.data);
+    };
+    recorder.onstop = () => {
+      for (const track of stream.getTracks()) track.stop();
+      this.recorder = null;
+      this.ctx.say(t2("Recorded {s} s.", { s: ((performance.now() - started) / 1e3).toFixed(1) }));
+      void this.replace(new Blob(chunks, { type: recorder.mimeType }));
+    };
+    recorder.start();
+    this.ctx.say(t2("Recording\u2026 press Stop Recording when done."));
+    this.drawSide();
+  }
+  async save(file) {
+    const bytes = await this.ctx.session.readOver(file);
+    if (!bytes) return;
+    const where = await this.ctx.api.ui.saveFile(bytes, file.split("\\").pop());
+    if (where) this.ctx.say(t2("Saved {file}.", { file: where.fileName }));
+  }
+  dispose() {
+    this.stop();
+    this.recorder?.stop();
+    void this.audio?.close();
   }
 };
 
@@ -10101,7 +11645,7 @@ var ModSession = class _ModSession {
   }
   changed(kind) {
     this.revision++;
-    if (kind !== "script") this.data.names = namesOf(this.data.tables, this.data.strings);
+    if (kind === "table" || kind === "strings") this.data.names = namesOf(this.data.tables, this.data.strings);
     if (kind === "table") this.refs = new RefIndex(this.data.tables);
     for (const l of this.listeners) l();
   }
@@ -10283,6 +11827,7 @@ var ModSession = class _ModSession {
     const ai = ["scripts\\aiscript.bin", "scripts\\bwscript.bin"].filter((m) => this.has(m));
     if (ai.length) out.push({ id: "ai", kind: "ai", label: "ai/aiscript.txt", members: ai.map((m) => this.nameOf(m)), fromGame: false });
     else if (this.base && await this.base("scripts\\aiscript.bin")) out.push({ id: "ai", kind: "ai", label: "ai/aiscript.txt", members: ["scripts\\aiscript.bin", "scripts\\bwscript.bin"], fromGame: true });
+    for (const m of this.members().filter((k) => /\.lo[a-z]$/.test(k))) out.push({ id: `overlay:${m}`, kind: "overlay", label: placeOf(this.nameOf(m)).file, members: [this.nameOf(m)], fromGame: false });
     return out;
   }
   script(id) {
@@ -10300,6 +11845,10 @@ var ModSession = class _ModSession {
         const bytes = await this.readOver(doc.members[0]);
         if (!bytes) throw new Error(`${doc.members[0]} is not there`);
         state.text = iscriptToText(bytes, { headerComment: (sid) => this.iscriptComment(sid) });
+      } else if (doc.kind === "overlay") {
+        const bytes = await this.readOver(doc.members[0]);
+        if (!bytes) throw new Error(`${doc.members[0]} is not there`);
+        state.text = loToText(decodeLoFile(bytes));
       } else {
         const [ai, bw] = await Promise.all(doc.members.map((m) => this.readOver(m)));
         if (!ai) throw new Error("scripts\\aiscript.bin is not there");
@@ -10335,6 +11884,7 @@ var ModSession = class _ModSession {
     state.text = text;
     try {
       if (doc.kind === "iscript") this.putScript(doc.members[0], iscriptFromText(text));
+      else if (doc.kind === "overlay") this.putScript(doc.members[0], encodeLoFile(loFromText(text)));
       else {
         const out = aiscriptFromText(text, { names: state.names });
         this.putScript(doc.members[0], out.aiscript);
@@ -10346,7 +11896,8 @@ var ModSession = class _ModSession {
       }
       state.error = null;
     } catch (e) {
-      const line = e.line ?? 0;
+      const said = e.message ?? String(e);
+      const line = e.line ?? Number(/^line (\d+): /.exec(said)?.[1] ?? 0);
       state.error = { line, message: e.message.replace(/^line \d+: /, "") };
     }
     this.changed("script");
@@ -10360,6 +11911,30 @@ var ModSession = class _ModSession {
     if (!this.source.files.has(k)) this.added.set(k, member);
     const doc = this.scripts.find((s) => s.members.some((m) => gameName(m) === k));
     if (doc) doc.fromGame = false;
+  }
+  /**
+   * A member's bytes replaced as a whole (a picture imported, a sound replaced). A member the mod did not have becomes
+   * its own. Bytes equal to what came leave the member untouched.
+   */
+  setMember(member, bytes) {
+    const k = gameName(member);
+    const was = this.source.files.get(k);
+    this.digests.delete(k);
+    this.baseSame.delete(k);
+    this.overrides.set(k, bytes);
+    if (!was) this.added.set(k, member);
+    this.changed("file");
+  }
+  /** An overlay opened as text (the game's, for an image whose overlay the mod does not have) becomes a script to edit. */
+  addOverlay(member) {
+    const k = gameName(member);
+    const id = `overlay:${k}`;
+    let doc = this.script(id);
+    if (!doc) {
+      doc = { id, kind: "overlay", label: placeOf(member).file, members: [member], fromGame: !this.has(k) };
+      this.scripts.push(doc);
+    }
+    return doc;
   }
   /** Scripts whose text does not assemble now (the member keeps its last good bytes). */
   scriptErrors() {
@@ -10774,7 +12349,7 @@ async function openTextFolder(root, manifest, pieces, name, base) {
 }
 
 // stringsView.ts
-var ROW = 22;
+var ROW2 = 22;
 var REF_OF = { "rez\\stat_txt.tbl": "stat_txt.tbl", "arr\\images.tbl": "images.tbl", "arr\\sfxdata.tbl": "sfxdata.tbl", "arr\\portdata.tbl": "portdata.tbl", "arr\\mapdata.tbl": "mapdata.tbl" };
 var StringsView = class {
   el;
@@ -10836,7 +12411,7 @@ var StringsView = class {
     this.filter();
     if (entry !== void 0) {
       const at = this.ids.indexOf(entry - 1);
-      if (at >= 0) this.grid.scrollTop = Math.max(0, (at + 1) * ROW - this.grid.clientHeight / 3);
+      if (at >= 0) this.grid.scrollTop = Math.max(0, (at + 1) * ROW2 - this.grid.clientHeight / 3);
       this.drawn.revision = -1;
       this.paint();
     }
@@ -10849,7 +12424,7 @@ var StringsView = class {
       if (!q || i2 + 1 === n || s.toLowerCase().includes(q)) this.ids.push(i2);
     });
     this.count.textContent = q ? t2("{shown} of {total} found", { shown: num2(this.ids.length), total: num2(this.strings.length) }) : t2("{total} entries", { total: num2(this.strings.length) });
-    this.sizer.style.height = `${(this.ids.length + 1) * ROW}px`;
+    this.sizer.style.height = `${(this.ids.length + 1) * ROW2}px`;
     if (!keep) this.grid.scrollTop = 0;
     this.drawn.revision = -1;
     this.paint();
@@ -10870,14 +12445,14 @@ var StringsView = class {
   }
   paint() {
     if (!this.el.isConnected || this.editing) return;
-    const from = Math.max(0, Math.floor(this.grid.scrollTop / ROW) - 9);
-    const to = Math.min(this.ids.length, Math.ceil((this.grid.scrollTop + this.grid.clientHeight) / ROW) + 8);
+    const from = Math.max(0, Math.floor(this.grid.scrollTop / ROW2) - 9);
+    const to = Math.min(this.ids.length, Math.ceil((this.grid.scrollTop + this.grid.clientHeight) / ROW2) + 8);
     if (from === this.drawn.from && to === this.drawn.to && this.drawn.revision === this.ctx.session.revision) return;
     this.drawn = { from, to, revision: this.ctx.session.revision };
     clear(this.rows);
     const cols = "grid-template-columns: 60px minmax(0, 1fr) 260px";
     this.rows.append(h("div", { className: "mx-row head", style: cols }, h("span", { className: "mx-cell num" }, t2("Entry")), h("span", { className: "mx-cell" }, t2("Text")), h("span", { className: "mx-cell" }, t2("Used by"))));
-    this.rows.append(h("div", { style: `height: ${from * ROW}px` }));
+    this.rows.append(h("div", { style: `height: ${from * ROW2}px` }));
     for (let k = from; k < to; k++) {
       const i2 = this.ids[k];
       const text = h("span", { className: "mx-cell mx-mono", title: entryText(this.strings[i2]) }, tblEscape(this.strings[i2]));
@@ -10952,7 +12527,7 @@ function parse(field, text) {
 }
 
 // tablesView.ts
-var ROW2 = 22;
+var ROW3 = 22;
 var NAMED = ["units", "weapons", "upgrades", "techdata"];
 function tableLabel(table) {
   switch (table) {
@@ -11103,7 +12678,7 @@ var TablesView = class {
     const named = names.filter(Boolean).length;
     const what = tableLabel(this.table).toLowerCase();
     this.count.textContent = q ? t2("{shown} of {total} found", { shown: num2(ids.length), total: num2(file.count) }) : NAMED.includes(this.table) ? t2("{named} named {what} of {total}", { named: num2(named), what, total: num2(file.count) }) : t2("{total} entries", { total: num2(file.count) });
-    this.sizer.style.height = `${(ids.length + 1) * ROW2}px`;
+    this.sizer.style.height = `${(ids.length + 1) * ROW3}px`;
     this.sizer.style.width = `${56 + 210 + 52 + this.columns.reduce((n, c3) => n + (c3.field.text?.kind === "flags" ? 96 : 84), 0)}px`;
     if (!keep) this.grid.scrollTop = 0;
     this.drawn.revision = -1;
@@ -11114,8 +12689,8 @@ var TablesView = class {
     const at = this.ids.indexOf(id);
     if (at < 0) return;
     this.selected = id;
-    const top = (at + 1) * ROW2;
-    if (top < this.grid.scrollTop + ROW2 || top > this.grid.scrollTop + this.grid.clientHeight - ROW2) this.grid.scrollTop = Math.max(0, top - this.grid.clientHeight / 3);
+    const top = (at + 1) * ROW3;
+    if (top < this.grid.scrollTop + ROW3 || top > this.grid.scrollTop + this.grid.clientHeight - ROW3) this.grid.scrollTop = Math.max(0, top - this.grid.clientHeight / 3);
     if (field) {
       const col = this.columns.findIndex((c3) => c3.key === field || c3.field.name === field);
       if (col >= 0) this.grid.scrollLeft = Math.max(0, 318 + col * 84 - this.grid.clientWidth / 2);
@@ -11126,8 +12701,8 @@ var TablesView = class {
   }
   paint() {
     if (!this.el.isConnected) return;
-    const from = Math.max(0, Math.floor(this.grid.scrollTop / ROW2) - 1 - 8);
-    const to = Math.min(this.ids.length, Math.ceil((this.grid.scrollTop + this.grid.clientHeight) / ROW2) + 8);
+    const from = Math.max(0, Math.floor(this.grid.scrollTop / ROW3) - 1 - 8);
+    const to = Math.min(this.ids.length, Math.ceil((this.grid.scrollTop + this.grid.clientHeight) / ROW3) + 8);
     if (from === this.drawn.from && to === this.drawn.to && this.drawn.revision === this.session.revision && !this.editing) return;
     if (this.editing) return;
     this.drawn = { from, to, revision: this.session.revision };
@@ -11143,7 +12718,7 @@ var TablesView = class {
     head.style.position = "sticky";
     this.rows.append(head);
     const names = this.entryNames();
-    const spacer = h("div", { style: `height: ${from * ROW2}px` });
+    const spacer = h("div", { style: `height: ${from * ROW3}px` });
     this.rows.append(spacer);
     for (let i2 = from; i2 < to; i2++) {
       const id = this.ids[i2];
@@ -11280,6 +12855,7 @@ var TablesView = class {
     }
     const name = this.session.entryName(this.table, id);
     this.side.append(h("h4", null, `${tableLabel(this.table)} ${id}${name ? ` \u2014 ${name}` : ""}`));
+    if (this.table === "images") this.side.append(h("p", null, h("a", { className: "mx-link", onclick: () => this.ctx.goImage(id) }, t2("Its picture and animation \u2192"))));
     const kv = h("div", { className: "mx-kv" });
     for (const c3 of this.columns) {
       if (!this.session.stores(this.table, c3.field, id)) continue;
@@ -11407,13 +12983,19 @@ var ModEditor = class {
   tables = null;
   strings = null;
   scripts = null;
+  pictures = null;
+  sounds = null;
+  overlays = null;
+  /** The palette and team colour pictures are drawn with, shared by the Pictures tab and the previews. */
+  look = null;
   statusEl = null;
   said = "";
   /** Draw-from state: the profile handed to `attach`, the hash it carries, and the set in use before. */
   attached = null;
   before = null;
   reader = null;
-  quiet = 0;
+  /** Paths the plugin is reading from the copy underneath at this moment: the reader answers nothing for them. */
+  quiet = /* @__PURE__ */ new Map();
   /** The game's small files (tables, string tables, iscript, the unit manifest) as read before the mod was laid over them. */
   baseCache = /* @__PURE__ */ new Map();
   baseManifest = null;
@@ -11435,7 +13017,7 @@ var ModEditor = class {
     this.panel = this.api.ui.panel({
       title: t2("Mod Editor"),
       dock: "bottom",
-      height: 340,
+      height: 380,
       mount: (body) => {
         this.body = h("div", { className: "mx" });
         body.append(this.body);
@@ -11450,11 +13032,20 @@ var ModEditor = class {
   relabel() {
     this.panel?.setTitle(t2("Mod Editor"));
     if (this.session) this.found = foundLine(this.session.source);
+    this.dropViews();
+    this.draw();
+  }
+  /** Every tab's view goes (a language change, another mod); they are made again when shown. */
+  dropViews() {
+    this.scripts?.dispose();
+    this.overlays?.dispose();
+    this.sounds?.dispose();
     this.tables = null;
     this.strings = null;
-    this.scripts?.dispose();
     this.scripts = null;
-    this.draw();
+    this.pictures = null;
+    this.sounds = null;
+    this.overlays = null;
   }
   draw() {
     const body = this.body;
@@ -11472,7 +13063,7 @@ var ModEditor = class {
       this.tab = id;
       this.draw();
     } }, label);
-    tabs.append(tabButton("tables", t2("Tables")), tabButton("strings", t2("Strings")), tabButton("scripts", t2("Scripts")));
+    tabs.append(tabButton("tables", t2("Tables")), tabButton("strings", t2("Strings")), tabButton("pictures", t2("Pictures")), tabButton("sounds", t2("Sounds")), tabButton("scripts", t2("Scripts")), tabButton("overlays", t2("Overlays")));
     const bar = h(
       "div",
       { className: "mx-bar" },
@@ -11496,6 +13087,7 @@ var ModEditor = class {
   }
   context() {
     return {
+      api: this.api,
       session: this.session,
       say: (text) => this.say(text),
       go: (table, id, field) => this.go(table, id, field),
@@ -11508,6 +13100,12 @@ var ModEditor = class {
         this.tab = "strings";
         this.draw();
         void this.strings.show(member, entry);
+      },
+      gameGrps: () => this.baseManifest?.grps ?? [],
+      goImage: (id) => {
+        this.tab = "pictures";
+        this.draw();
+        void this.pictures.showImage(id);
       }
     };
   }
@@ -11522,7 +13120,24 @@ var ModEditor = class {
       this.strings.refresh();
       return this.strings.el;
     }
-    this.scripts ??= new ScriptsView(this.context(), this.api.storage.get(DIST_STORAGE_KEY, DEFAULT_DIST));
+    this.look ??= new Look(this.session);
+    if (tab === "pictures") {
+      this.pictures ??= new PicturesView(this.context(), this.look);
+      this.pictures.refresh();
+      return this.pictures.el;
+    }
+    if (tab === "sounds") {
+      this.sounds ??= new SoundsView(this.context());
+      this.sounds.refresh();
+      return this.sounds.el;
+    }
+    const dist = this.api.storage.get(DIST_STORAGE_KEY, DEFAULT_DIST);
+    if (tab === "overlays") {
+      this.overlays ??= new ScriptsView(this.context(), dist, ["overlay"]);
+      this.overlays.refresh();
+      return this.overlays.el;
+    }
+    this.scripts ??= new ScriptsView(this.context(), dist, ["iscript", "ai"], this.look);
     this.scripts.refresh();
     return this.scripts.el;
   }
@@ -11636,10 +13251,8 @@ var ModEditor = class {
   }
   /** `restore`: put the editor back on the data set it drew from before (not when another mod is about to replace it). */
   closeMod(redraw = true, restore = true) {
-    this.scripts?.dispose();
-    this.tables = null;
-    this.strings = null;
-    this.scripts = null;
+    this.dropViews();
+    this.look = null;
     const ours = !!this.attached && this.isOurs();
     this.session = null;
     this.attached = null;
@@ -11659,13 +13272,15 @@ var ModEditor = class {
     const stored = storedPathOf(member);
     if (!COPY_HOLDS.test(stored)) return null;
     if (this.baseCache.has(stored)) return this.baseCache.get(stored);
-    this.quiet++;
+    this.quiet.set(stored, (this.quiet.get(stored) ?? 0) + 1);
     try {
       const bytes = await this.api.gameData.read(stored);
       if (SMALL.test(stored)) this.baseCache.set(stored, bytes);
       return bytes;
     } finally {
-      this.quiet--;
+      const n = this.quiet.get(stored) - 1;
+      if (n) this.quiet.set(stored, n);
+      else this.quiet.delete(stored);
     }
   }
   async readBaseManifest() {
@@ -11711,7 +13326,7 @@ var ModEditor = class {
     if (first) {
       const now = this.api.gameData.source();
       this.before = now && now.kind !== "reader" ? now.profile.id : this.before;
-      this.reader = attachReader({ members: () => session.members(), read: (m) => session.read(m), baseManifest: this.baseManifest }, () => this.quiet > 0);
+      this.reader = attachReader({ members: () => session.members(), read: (m) => session.read(m), baseManifest: this.baseManifest }, (path) => this.quiet.has(path));
     }
     const profile = this.profile();
     const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
@@ -11743,6 +13358,9 @@ var ModEditor = class {
   edited() {
     if (this.tab === "tables") this.tables?.refresh();
     else if (this.tab === "strings") this.strings?.refresh();
+    else if (this.tab === "pictures") this.pictures?.refresh();
+    else if (this.tab === "sounds") this.sounds?.refresh();
+    else if (this.tab === "overlays") this.overlays?.refresh();
     else this.scripts?.refresh();
     clearTimeout(this.update.timer);
     this.update.timer = window.setTimeout(() => void this.redraw(), 400);
