@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Archive } from "mopaq";
-import { dataSetHash, decodeDat, decodeTblFile } from "@scm-js/core";
+import { decodeDat, decodeTblFile, modHash } from "@scm-js/core";
 import { openPieces } from "../source";
 import { ModSession } from "../session";
 import { attachReader } from "../reader";
@@ -111,14 +111,26 @@ describe("what the editor is handed", () => {
     expect(looksLikeMod(["photos/a.jpg", "photos/arr.txt"])).toBe(false);
   });
 
-  it("the hash is the shared rule's", async () => {
-    const s = await open();
+  it("the hash is the mod's, by the rule the play page and `scmjs mod info` share", async () => {
+    const carried = [bytesPiece("made/plugins/gptp.qdp", new Uint8Array([1, 2, 3])), bytesPiece("made/Made.fgp", new Uint8Array([4, 5])), bytesPiece("made/1161.fgd", new Uint8Array([6]))];
+    const s = await open([...madeFolder(), ...carried]);
+    const want = async () => {
+      const files: { name: string; bytes: Uint8Array }[] = [];
+      for (const k of s.members()) { const bytes = await s.read(k); if (bytes) files.push({ name: k, bytes }); }
+      return (await modHash({ files, plugins: [{ name: "gptp.qdp", bytes: new Uint8Array([1, 2, 3]) }], firegraft: [{ name: "Made.fgp", bytes: new Uint8Array([4, 5]) }] })).hash;
+    };
+    // Every game file, the plugin and the project: not the files that differ from the game's alone.
+    const opened = await s.hash();
+    expect(opened).toBe(await want());
+    expect(opened).not.toBe((await modHash({ files: await s.changedFiles() })).hash);
+    // FireGraft's database is not a line.
+    const withoutFgd = await open([...madeFolder(), ...carried.slice(0, 2)]);
+    expect(await withoutFgd.hash()).toBe(opened);
+    // An edit is in it, and only the edited member is read again.
     s.setField({ table: "units", id: 0, field: "hit_points", value: 45 * 256 });
-    const files = await s.changedFiles();
-    expect(files.length).toBe(5);
-    expect(await s.hash()).toBe(await dataSetHash(files));
-    s.setField({ table: "units", id: 0, field: "hit_points", value: 50 * 256 });
-    expect(await s.hash()).toBe(await dataSetHash(await s.changedFiles()));
+    const edited = await s.hash();
+    expect(edited).not.toBe(opened);
+    expect(edited).toBe(await want());
   });
 });
 

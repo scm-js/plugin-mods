@@ -6,8 +6,8 @@
  */
 import {
   DAT_SCHEMAS, DAT_TABLES, aiNames, decodeLoFile, encodeLoFile, loFromText, loToText, aiscriptFromText, aiscriptToText, checkMod, datTableOf, decodeDat, decodeTblFile, diffMods, encodeDat, encodeTblFile,
-  entryText, fieldType, gameName, iscriptFromText, iscriptToText, loadModData, namesOf, placeOf, readIscriptHeaders, storedRange,
-  type AiNames, type DatField, type DatFile, type DatTableName, type DiffSide, type ModChange, type ModData, type ModFinding, type TblFile,
+  entryText, fieldType, gameName, iscriptFromText, iscriptToText, loadModData, modHashOfDigests, namesOf, placeOf, readIscriptHeaders, storedRange,
+  type AiNames, type Digest, type DatField, type DatFile, type DatTableName, type DiffSide, type ModChange, type ModData, type ModFinding, type TblFile,
 } from "@scm-js/core";
 import { msg, translate, type Params } from "./i18n";
 import { RefIndex } from "./refs";
@@ -87,6 +87,8 @@ export class ModSession {
   private readonly editListeners = new Set<(e: EditEvent) => void>();
   private opened: ModData | null = null;
   private readonly digests = new Map<string, string>();
+  /** The digests of the plugins and FireGraft project the mod carries, which no edit changes. */
+  private carried: Promise<{ plugins: Digest[]; firegraft: Digest[] }> | null = null;
   /** Whether a member is byte for byte the game's, once asked. */
   private readonly baseSame = new Map<string, boolean>();
 
@@ -521,18 +523,34 @@ export class ModSession {
   }
 
   /**
-   * The data set's hash over the changed members, by the shared rule (sorted `name<TAB>sha256` lines, the first sixteen
-   * hex digits). Each member's digest is kept until it changes, so after an edit only that member is read again.
+   * The mod's hash by the rule the play page, `scmjs mod info` and the editor's data sets share (core's
+   * `modHashOfDigests`; docs/mods.md, "The mod's hash"): a line for every game file the mod provides as it is now, one
+   * for each plugin it carries as a file (a plugin inside its archive is not loaded by the play page, so not a line)
+   * and one for its FireGraft project. Never compared with the game's own files: the play page finds the mod it keeps
+   * by this hash. A member that cannot be read (listed by its archive and not in it) is left out, as the page leaves
+   * it. Each member's digest is kept until it changes, so after an edit only that member is read again.
    */
   async hash(): Promise<string> {
-    const lines: string[] = [];
-    for (const k of await this.changedMembers()) {
+    const files: Digest[] = [];
+    for (const k of this.members()) {
+      if (!this.has(k)) continue;
       let d = this.digests.get(k);
-      if (!d) { const bytes = await this.read(k); if (!bytes) continue; d = await sha256(bytes); this.digests.set(k, d); }
-      lines.push(`${k}\t${d}`);
+      if (!d) {
+        let bytes: Uint8Array | null = null;
+        try { bytes = await this.read(k); } catch { /* left out */ }
+        if (!bytes) continue;
+        d = await sha256(bytes);
+        this.digests.set(k, d);
+      }
+      files.push({ name: k, sha256: d });
     }
-    lines.sort((a, b) => { const x = a.split("\t")[0], y = b.split("\t")[0]; return x < y ? -1 : x > y ? 1 : 0; });
-    return (await sha256(new TextEncoder().encode(lines.join("\n")))).slice(0, 16);
+    this.carried ??= (async () => {
+      const plugins: Digest[] = [], firegraft: Digest[] = [];
+      for (const p of this.source.plugins) if (!p.member) plugins.push({ name: p.name, sha256: await sha256(await p.read()) });
+      for (const p of this.source.firegraft) if (/\.fgp$/i.test(p.name)) firegraft.push({ name: p.name, sha256: await sha256(await p.read()) });
+      return { plugins, firegraft };
+    })();
+    return (await modHashOfDigests({ files, ...(await this.carried) })).hash;
   }
 
   /** Every iscript id the mod's scripts define now, for the completion and the tables' references. */
