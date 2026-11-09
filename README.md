@@ -3,6 +3,13 @@
 A plugin for the [scmJS](https://github.com/scm-js/scm-js) StarCraft map editor: open a mod and edit its tables,
 strings, animation scripts and AI scripts beside the map, with the map drawn from the mod's files as you change them.
 
+## Installing
+
+In scmJS, open **Plugins ▸ Browse Plugins…** and press **Install** on the Mod Editor row. You can also open
+**Plugins ▸ Manage Plugins…**, paste `github:scm-js/plugin-mods` and press **Add**.
+
+It needs scmJS 0.13.0 or newer. An older editor opens mods and edits them, but cannot draw the map from them.
+
 ## What it does
 
 **File ▸ Open a Mod…** opens a panel under the map. Drop the mod on it, or choose its folder or file: a folder of the
@@ -85,24 +92,6 @@ and add its address in Plugins ▸ Manage Plugins (or open the editor with `?plu
 The code editor is TrigScript's Monaco build, fetched from jsDelivr at a tag of that repository; for work without the
 network, serve TrigScript's `dist/` and set the plugin's storage key `monacoDist` to its address
 (`localStorage["scmjs.plugin.mods.monacoDist"] = JSON.stringify("http://127.0.0.1:<port>/monaco")`).
-
-## Before publishing
-
-Two things this plugin uses are on scm-js's `mods` branch and not yet published:
-
-- **`@scm-js/core` with the mod formats** (and the WAV codec). `package.json` takes it as `file:../scm-js-mods/core`
-  (a checkout of that branch beside this one), and `build.mjs`, `tsconfig.json` (`paths`, plus `core-env.d.ts` for
-  the Vite-only `import.meta` of a few of the editor's modules) and `vitest.config.ts` read its sources. When it is
-  published: `npm install @scm-js/core@<that version>`, then delete the `alias` in `build.mjs` (skipped already once
-  `node_modules/@scm-js/core/dist/` exists), the `@scm-js/core` entry in `tsconfig.json`'s `paths`, `core-env.d.ts`,
-  and the alias in `vitest.config.ts`.
-- **The plugin API's additions for data sets** — a reader told the member and able to read beneath it,
-  `gameData.rehash` and `storedPath`, `ui.pickFiles({ directory: true })`, folders for `ui.fileType`,
-  `graphics.grpImage`. They arrive in the next `@scm-js/plugin-api` release after 1.67.0, so **1.68.0 is the minimum**.
-  Until then `types/plugin-api/index.d.ts` is that release's declarations, generated from the branch
-  (`node scripts/build-plugin-types.mjs --out …` in scm-js), and `tsconfig.json`'s `paths` points the package at it.
-  When it is published: `npm install -D @scm-js/plugin-api@^1.68.0`, delete `types/`, and the `@scm-js/plugin-api`
-  entry in `paths`. An editor older than these additions opens mods and edits them, but cannot draw from them.
 
 ## License
 
