@@ -13,11 +13,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@scm-js/core": "file:../scm-js-mods/core",
+    "@scm-js/core": "^0.13.0",
     "mopaq": "^1.6.2"
   },
   "devDependencies": {
-    "@scm-js/plugin-api": "^1.67.0",
+    "@scm-js/plugin-api": "^1.69.0",
     "@types/node": "^24.19.2",
     "esbuild": "^0.28.2",
     "monaco-editor": "^0.56.0",
