@@ -18561,6 +18561,66 @@ var LiveSender = class {
   }
 };
 
+// engine.ts
+var ENGINE_SERVICE = "scm-sim.engine";
+async function engineFiles(s) {
+  const out = [];
+  for (const k of s.members()) {
+    if (!s.has(k)) continue;
+    let bytes = null;
+    try {
+      bytes = await s.read(k);
+    } catch {
+    }
+    if (bytes) out.push({ path: livePath(s.nameOf(k)), bytes });
+  }
+  const leaf2 = (n) => n.split(/[\\/]/).pop();
+  for (const p of s.source.plugins) if (!p.member) out.push({ path: `plugins/${leaf2(p.name)}`, bytes: await p.read() });
+  for (const p of s.source.firegraft) if (/\.(fgp|fgd)$/i.test(p.name)) out.push({ path: `firegraft/${leaf2(p.name)}`, bytes: await p.read() });
+  return out;
+}
+var EngineRegistration = class {
+  engine = null;
+  now = null;
+  held = null;
+  /** The engine service came or went. */
+  service(engine) {
+    this.engine = engine && engine.present ? engine : null;
+    this.sync();
+  }
+  /** The mod open now and the hash it is named by; null for none. */
+  set(mod) {
+    this.now = mod && mod.hash ? { session: mod.session, name: mod.name, hash: mod.hash } : null;
+    this.sync();
+  }
+  /** The hash registered now, or null. */
+  registered() {
+    return this.held?.hash ?? null;
+  }
+  sync() {
+    const now = this.now, engine = this.engine;
+    if (this.held && (!now || !engine || this.held.hash !== now.hash || this.held.session !== now.session)) {
+      try {
+        this.held.dispose();
+      } catch {
+      }
+      this.held = null;
+    }
+    if (this.held || !now || !engine || typeof engine.provideMod !== "function") return;
+    const session = now.session;
+    try {
+      const handle = engine.provideMod(now.hash, { name: now.name, files: () => engineFiles(session) });
+      this.held = { hash: now.hash, session, dispose: () => handle.dispose() };
+    } catch {
+    }
+  }
+  dispose() {
+    this.now = null;
+    this.engine = null;
+    this.sync();
+  }
+};
+
 // fields.ts
 function columnsOf(table) {
   const out = [];
@@ -19044,8 +19104,10 @@ function activate(api) {
   api.events.on("language", () => editor.relabel());
   api.events.on("gameData", () => editor.sourceChanged());
   const watching = api.services.watch(LIVE_SERVICE, (service) => editor.liveService(service));
+  const engine = api.services.watch(ENGINE_SERVICE, (service) => editor.engineService(service));
   return () => {
     watching.dispose();
+    engine.dispose();
     editor.close(true);
   };
 }
@@ -19068,6 +19130,8 @@ var ModEditor = class {
   /** Edits into a running test game (`live.ts`). */
   live = new LiveSender(() => this.status());
   liveSvc = null;
+  /** The open mod registered with the engine by its hash (`engine.ts`). */
+  engine = new EngineRegistration();
   /** The palette and team colour pictures are drawn with, shared by the Pictures tab and the previews. */
   look = null;
   statusEl = null;
@@ -19092,6 +19156,15 @@ var ModEditor = class {
     this.liveSvc = service && service.present ? service : null;
     this.live.setService(this.liveSvc);
     if (this.session) this.draw();
+  }
+  /** The `scm-sim.engine` service came or went. */
+  engineService(service) {
+    this.engine.service(service);
+  }
+  /** The mod registered with the engine as it stands: its hash while the editor draws from it, none otherwise. */
+  provide() {
+    const s = this.session;
+    this.engine.set(s && this.attached?.hash ? { session: s, name: s.source.name, hash: this.attached.hash } : null);
   }
   /** The game data API when the editor can draw from a set in memory (an editor from before it cannot). */
   get gameData() {
@@ -19346,6 +19419,7 @@ var ModEditor = class {
     this.live.follow(null);
     this.attached = null;
     this.reader = null;
+    this.provide();
     clearTimeout(this.update.timer);
     if (ours && restore) void (async () => this.api.gameData.select(this.before ?? (await this.api.gameData.profiles())[0]?.id ?? "starcraft"))().catch(() => void 0);
     this.said = "";
@@ -19355,6 +19429,7 @@ var ModEditor = class {
     this.closeMod(!disposing);
     this.playTab?.dispose();
     this.live.dispose();
+    this.engine.dispose();
     if (disposing) this.panel?.close();
   }
   /* ── The game's own files, read past the mod ── */
@@ -19419,6 +19494,7 @@ var ModEditor = class {
     if (this.session !== session) return;
     const source = await gd.attach(profile, this.reader, hash ? { hash } : void 0);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
+    this.provide();
     this.status();
     if (!hash) {
       this.say(t("Working out the mod's hash over {size}\u2026", { size: sizeText(bytes) }));
@@ -19426,6 +19502,7 @@ var ModEditor = class {
       if (this.session !== session || !this.isOurs()) return;
       const again = gd.rehash(later);
       this.attached = { profile, hash: later, label: this.attachedLabel(again?.label ?? source.label, later) };
+      this.provide();
       this.say(t("The mod's hash is {hash}.", { hash: later }));
     }
   }
@@ -19436,6 +19513,7 @@ var ModEditor = class {
   sourceChanged() {
     if (!this.attached || this.isOurs()) return;
     this.attached = null;
+    this.provide();
     this.say(t("Another data set was chosen, so the editor no longer draws from {name}. Edit anything to draw from it again.", { name: this.session?.source.name ?? "" }));
   }
   /** An edit: redraw the views, and a moment later have the editor read the mod's files again. */
@@ -19468,6 +19546,7 @@ var ModEditor = class {
         if (hash !== this.attached.hash) {
           const source = gd.rehash(hash);
           this.attached = { profile: this.attached.profile, hash, label: this.attachedLabel(source?.label ?? "", hash) };
+          this.provide();
         }
       }
       const edited = await session.edited();
