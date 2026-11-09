@@ -17452,6 +17452,16 @@ async function sha2562(bytes) {
 }
 
 // source.ts
+var SYSTEM_FILES = {
+  names: ["desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store", "icon\r", ".directory"],
+  prefixes: ["._"],
+  folders: ["__macosx"]
+};
+function isSystemFile(path) {
+  const parts = path.toLowerCase().split(/[\\/]/).filter(Boolean);
+  const name = parts.pop() ?? "";
+  return SYSTEM_FILES.names.includes(name) || SYSTEM_FILES.prefixes.some((p) => name.startsWith(p)) || parts.some((folder) => SYSTEM_FILES.folders.includes(folder));
+}
 var OpenError = class extends Error {
 };
 function emptySource(kind, name) {
@@ -17520,6 +17530,10 @@ async function fromPieces(kind, name, pieces) {
   const take = async (list, depth) => {
     for (const p of list) {
       const l = leaf(p.path).toLowerCase();
+      if (isSystemFile(p.path)) {
+        source.left.push(p.path);
+        continue;
+      }
       if (/\.(qdp|bwl)$/.test(l)) {
         source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path });
         continue;
@@ -17583,6 +17597,7 @@ async function fromPieces(kind, name, pieces) {
       if (!info) continue;
       const read = async () => archive.readFile(n);
       const key = gameName(n);
+      if (isSystemFile(key)) continue;
       if (/\.(qdp|bwl)$/.test(key)) {
         source.plugins.push({ name: n.split("\\").pop(), bytes: info.uncompressedSize, read, member: n, layer: label });
         continue;
@@ -17648,6 +17663,10 @@ async function openTextFolder(root, manifest, pieces, name, base) {
   };
   for (const p of inside) {
     if (p.path === MOD_MANIFEST) continue;
+    if (isSystemFile(p.path)) {
+      source.left.push(p.path);
+      continue;
+    }
     const of = memberOf(p.path, manifest);
     if (!of) {
       source.left.push(p.path);
