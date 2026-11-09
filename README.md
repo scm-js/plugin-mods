@@ -53,7 +53,10 @@ one line what it found.
 
 **The map follows the mod.** While a mod is open the editor draws from it: the unit palette shows its units and names,
 the settings dialogs its defaults, the map its pictures. Change a unit's hit points and Unit Settings shows the new
-default. The status line says what the editor draws from and the mod's hash (the one a map saved now records).
+default. The status line says what the editor draws from and the mod's hash (the one a map saved now records). Files an
+operating system leaves in folders (`desktop.ini`, `Thumbs.db`, `.DS_Store` and the like) are not the mod's: they are
+left out of its files, its counts and its hash, so a mod has the same hash whether its folder was picked, dropped or
+read by `scmjs`.
 
 **Save** writes the mod in the form it came: an MPQ for an `.mpq`, `.exe` or `.zip`; the folder of text for a folder
 `scmjs mod unpack` wrote (as a zip); for a folder of loose files, the files you changed in their folders (as a zip, to

@@ -134,6 +134,59 @@ describe("what the editor is handed", () => {
   });
 });
 
+describe("an operating system's files are not the mod's", () => {
+  const text = (t: string) => new TextEncoder().encode(t);
+  /** One file of each kind the list names, under a game folder (and the zip folder macOS makes). */
+  const SYSTEM = ["sound/desktop.ini", "sound/misc/Desktop.INI", "unit/Thumbs.db", "unit/ehthumbs.db", "unit/ehthumbs_vista.db", "arr/.DS_Store", "arr/._units.dat", "arr/Icon\r", "rez/.directory", "arr/__MACOSX/units.dat", "__MACOSX/arr/._units.dat"];
+  /** Names that only hold one of the list's: files of the mod like any other. */
+  const NOT_SYSTEM = ["sound/mydesktop.ini", "sound/desktop.ini.bak", "sound/desktop.ini/voice.wav", "unit/thumbs.db.txt", "unit/xthumbs.db", "arr/.ds_store2", "arr/a._b", "arr/_.units.dat", "rez/x.directory", "arr/icon", "my__macosx/units.dat", "samase/config.ini"];
+
+  it("is told by name alone, any case and either slash", async () => {
+    const { isSystemFile, SYSTEM_FILES } = await import("../source");
+    for (const path of SYSTEM) {
+      expect(isSystemFile(path), path).toBe(true);
+      expect(isSystemFile(path.toUpperCase().replace(/\//g, "\\")), path).toBe(true);
+    }
+    for (const path of NOT_SYSTEM) expect(isSystemFile(path), path).toBe(false);
+    for (const name of SYSTEM_FILES.names) expect(SYSTEM.some((p) => p.toLowerCase().endsWith(`/${name}`)), JSON.stringify(name)).toBe(true);
+  });
+
+  it("a folder opens to the same files and the same hash with each of them and without; a name that only holds one counts", async () => {
+    const carried = [bytesPiece("made/plugins/gptp.qdp", new Uint8Array([1, 2, 3])), bytesPiece("made/Made.fgp", new Uint8Array([4, 5]))];
+    const plain = await open([...madeFolder(), ...carried]);
+    const hash = await plain.hash();
+    for (const path of SYSTEM) {
+      const s = await open([...madeFolder(), ...carried, bytesPiece(`made/${path}`, text("x"))]);
+      expect([...s.source.files.keys()].sort(), path).toEqual([...plain.source.files.keys()].sort());
+      expect(s.source.left, path).toContain(`made/${path}`);
+      expect(await s.hash(), path).toBe(hash);
+    }
+    for (const path of NOT_SYSTEM) {
+      const s = await open([...madeFolder(), ...carried, bytesPiece(`made/${path}`, text("x"))]);
+      expect(await s.hash(), path).not.toBe(hash);
+    }
+    // macOS's half of a plugin and of a project: no plugin, no project
+    const forked = await open([...madeFolder(), ...carried, bytesPiece("made/plugins/._gptp.qdp", text("fork")), bytesPiece("made/._Made.fgp", text("fork"))]);
+    expect(forked.source.plugins.map((p) => p.name)).toEqual(["made/plugins/gptp.qdp"]);
+    expect(forked.source.firegraft.map((p) => p.name)).toEqual(["made/Made.fgp"]);
+    expect(await forked.hash()).toBe(hash);
+  });
+
+  it("an archive packed from a folder that had one, and a zip made on macOS, are the same mod", async () => {
+    const folder = await openPieces(madeFolder(), "made");
+    const members = await Promise.all([...folder.files.values()].map(async (f) => ({ member: f.name, data: await f.read() })));
+    const hash = await (await ModSession.open(await openPieces([bytesPiece("made.mpq", await writeMpq(members))], "made.mpq"), { base: null })).hash();
+    const packed = await writeMpq([...members, { member: "sound\\desktop.ini", data: text("[ViewState]") }, { member: "sound\\misc\\Thumbs.db", data: text("t") }]);
+    const fromMpq = await ModSession.open(await openPieces([bytesPiece("made.mpq", packed)], "made.mpq"), { base: null });
+    expect([...fromMpq.source.files.keys()].sort()).toEqual([...folder.files.keys()].sort());
+    expect(await fromMpq.hash()).toBe(hash);
+    const zip = writeZip([...await Promise.all(madeFolder().map(async (p) => ({ file: p.path, data: await p.read() }))), { file: "__MACOSX/made/arr/._units.dat", data: text("fork") }, { file: "made/arr/.DS_Store", data: text("Bud1") }]);
+    const fromZip = await ModSession.open(await openPieces([bytesPiece("made.zip", zip)], "made.zip"), { base: null });
+    expect([...fromZip.source.files.keys()].sort()).toEqual([...folder.files.keys()].sort());
+    expect(await fromZip.hash()).toBe(hash);
+  });
+});
+
 describe("saving", () => {
   it("an MPQ: the edited member changed, every other byte for byte", async () => {
     const s = await open();

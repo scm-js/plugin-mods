@@ -13,6 +13,34 @@ import {
   decodeDat, datTableOf, type DatTableName, type ModData, type ModManifest, type ModNames,
 } from "@scm-js/core";
 
+/**
+ * Files an operating system or its file manager leaves in folders, and into the archives and zips made of them: never
+ * the game's, so never a mod's. Told by name alone, any case: `desktop.ini` (Windows Explorer's settings for a folder),
+ * `Thumbs.db`, `ehthumbs.db`, `ehthumbs_vista.db` (its caches of thumbnails), `.DS_Store` and `Icon\r` (the macOS
+ * Finder's), `._<name>` (the AppleDouble half of a file) and everything under `__MACOSX/` (the folder macOS's zips
+ * keep those in), `.directory` (KDE's).
+ *
+ * They are left out of the mod's files here, and so out of its hash, its counts and what a page is handed: the mod's
+ * hash has no line for one (`@scm-js/core`'s `SYSTEM_FILES`, the same list, from the release after 0.13.0, whose
+ * `modHashOfDigests` drops such a line itself). Why: the same folder is not handed over alike by every route. A folder
+ * picked with the browser's folder picker, or dropped and read through its handle, never shows `desktop.ini` or
+ * `Thumbs.db` (Chromium refuses the names); a drop read through its entries, a folder input and the command line do.
+ */
+export const SYSTEM_FILES = {
+  names: ["desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store", "icon\r", ".directory"],
+  prefixes: ["._"],
+  folders: ["__macosx"],
+} as const;
+
+/** Whether a path (either slash, any case) is one of `SYSTEM_FILES`: by its file name, or by a folder it is under. */
+export function isSystemFile(path: string): boolean {
+  const parts = path.toLowerCase().split(/[\\/]/).filter(Boolean);
+  const name = parts.pop() ?? "";
+  return (SYSTEM_FILES.names as readonly string[]).includes(name)
+    || SYSTEM_FILES.prefixes.some((p) => name.startsWith(p))
+    || parts.some((folder) => (SYSTEM_FILES.folders as readonly string[]).includes(folder));
+}
+
 /** A file as it was handed over: its path (forward slashes, folders included) and a way to read it. */
 export interface Piece {
   path: string;
@@ -47,7 +75,7 @@ export interface ModSource {
   exes: { file: string; kind: "sempq" | "firegraft"; at: number; plugins: { id: number; size: number }[] }[];
   /** Two files of a folder for one game path (any case): the later is used. */
   duplicates: string[];
-  /** Files that are not the game's (a read-me beside the game's folders), left out. */
+  /** Files that are not the game's (a read-me beside the game's folders, an operating system's `desktop.ini`), left out. */
   left: string[];
   /** Archives with no list of their files, read by the names the game uses. */
   probed: string[];
@@ -115,6 +143,8 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
   const take = async (list: Piece[], depth: number): Promise<void> => {
     for (const p of list) {
       const l = leaf(p.path).toLowerCase();
+      // (An operating system's file is nothing of the mod's, whatever its name ends in: macOS's `._gptp.qdp` is no plugin.)
+      if (isSystemFile(p.path)) { source.left.push(p.path); continue; }
       if (/\.(qdp|bwl)$/.test(l)) { source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
       if (/\.(fgp|fgd)$/.test(l)) { source.firegraft.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
       if (l === "mod.json" && p.path.split("/").length <= 2) {
@@ -152,6 +182,8 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
       if (!info) continue;
       const read = async () => archive.readFile(n);
       const key = gameName(n);
+      // (An archive packed from a folder Explorer had been in holds its desktop.ini too: not the mod's.)
+      if (isSystemFile(key)) continue;
       if (/\.(qdp|bwl)$/.test(key)) { source.plugins.push({ name: n.split("\\").pop()!, bytes: info.uncompressedSize, read, member: n, layer: label }); continue; }
       if (/\.(fgp|fgd)$/.test(key)) { source.firegraft.push({ name: n.split("\\").pop()!, bytes: info.uncompressedSize, read, member: n, layer: label }); continue; }
       source.files.set(key, { name: n, size: info.uncompressedSize, read, layer: label });
@@ -209,6 +241,7 @@ async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece
   };
   for (const p of inside) {
     if (p.path === MOD_MANIFEST) continue;
+    if (isSystemFile(p.path)) { source.left.push(p.path); continue; }
     const of = memberOf(p.path, manifest);
     if (!of) { source.left.push(p.path); continue; }
     if (of.form === "plugin" || of.form === "firegraft") {
