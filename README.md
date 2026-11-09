@@ -69,6 +69,13 @@ table, an image with no picture, a script no image uses …); click a finding to
 editor (on scmjs.dev), in a tab of its own. A development server of the editor alone has no play page, and the panel
 says so.
 
+While a mod is open and the editor draws from it, the scm-sim plugin (0.19.0 or later) is told where its files are,
+under the mod's hash. A replay of the mod opened in the Aftermath plugin's Game view, Play From Here, Test in Browser
+and a replay's analysis then play with the mod even where the play page has not got it yet: the page is handed the
+mod's files (every file it provides, its plugins and its FireGraft project) and keeps them, once. Nothing is read
+until a page says it has not got the mod. Another hash after an edit is registered in its place; closing the mod
+takes it away.
+
 **Start Test Game** takes Play's place when the scm-sim plugin is installed (its `scm-sim.live` service): the open map —
 or a blank one — is played with the mod in the play page's tab, and while that game runs alone **every edit goes into
 it**. A table's field is written into the running game between two turns (the marine's hit points, a weapon's damage:

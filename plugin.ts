@@ -31,6 +31,7 @@ import { OpenError, looksLikeMod, openPieces, type Piece } from "./source";
 import { StringsView } from "./stringsView";
 import { GraftsView } from "./graftsView";
 import { LIVE_SERVICE, LiveSender, livePath, type LiveService } from "./live";
+import { ENGINE_SERVICE, EngineRegistration, type EngineService } from "./engine";
 import { TablesView, type ViewContext } from "./tablesView";
 
 export default function activate(api: PluginApi) {
@@ -50,7 +51,9 @@ export default function activate(api: PluginApi) {
   api.events.on("gameData", () => editor.sourceChanged());
   // Live (part d): plugin-scm-sim's `scm-sim.live`, when it is installed, carries edits into a running test game.
   const watching = api.services.watch<LiveService>(LIVE_SERVICE, (service) => editor.liveService(service));
-  return () => { watching.dispose(); editor.close(true); };
+  // The open mod for the engine's pages (`engine.ts`): plugin-scm-sim 0.19.0's `provideMod`, when it is installed.
+  const engine = api.services.watch<EngineService>(ENGINE_SERVICE, (service) => editor.engineService(service));
+  return () => { watching.dispose(); engine.dispose(); editor.close(true); };
 }
 
 /** What the copy of the game the editor draws from keeps, by its paths: the rest it cannot say anything about. */
@@ -78,6 +81,8 @@ class ModEditor {
   /** Edits into a running test game (`live.ts`). */
   private readonly live = new LiveSender(() => this.status());
   private liveSvc: LiveService | null = null;
+  /** The open mod registered with the engine by its hash (`engine.ts`). */
+  private readonly engine = new EngineRegistration();
   /** The palette and team colour pictures are drawn with, shared by the Pictures tab and the previews. */
   private look: Look | null = null;
   private statusEl: HTMLElement | null = null;
@@ -105,6 +110,15 @@ class ModEditor {
     this.liveSvc = service && service.present ? service : null;
     this.live.setService(this.liveSvc);
     if (this.session) this.draw();
+  }
+
+  /** The `scm-sim.engine` service came or went. */
+  engineService(service: EngineService | null) { this.engine.service(service); }
+
+  /** The mod registered with the engine as it stands: its hash while the editor draws from it, none otherwise. */
+  private provide() {
+    const s = this.session;
+    this.engine.set(s && this.attached?.hash ? { session: s, name: s.source.name, hash: this.attached.hash } : null);
   }
 
   /** The game data API when the editor can draw from a set in memory (an editor from before it cannot). */
@@ -303,6 +317,7 @@ class ModEditor {
     this.live.follow(null);
     this.attached = null;
     this.reader = null;
+    this.provide();
     clearTimeout(this.update.timer);
     // Put the editor back on the data set it drew from before, if nothing else moved it meanwhile.
     if (ours && restore) void (async () => this.api.gameData.select(this.before ?? (await this.api.gameData.profiles())[0]?.id ?? "starcraft"))().catch(() => undefined);
@@ -314,6 +329,7 @@ class ModEditor {
     this.closeMod(!disposing);
     this.playTab?.dispose();
     this.live.dispose();
+    this.engine.dispose();
     if (disposing) this.panel?.close();
   }
 
@@ -379,6 +395,7 @@ class ModEditor {
     if (this.session !== session) return;
     const source = await gd.attach(profile, this.reader, hash ? { hash } : undefined);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
+    this.provide();
     this.status();
     if (!hash) {
       this.say(t("Working out the mod's hash over {size}…", { size: sizeText(bytes) }));
@@ -386,6 +403,7 @@ class ModEditor {
       if (this.session !== session || !this.isOurs()) return;
       const again = gd.rehash(later);
       this.attached = { profile, hash: later, label: this.attachedLabel(again?.label ?? source.label, later) };
+      this.provide();
       this.say(t("The mod's hash is {hash}.", { hash: later }));
     }
   }
@@ -398,6 +416,7 @@ class ModEditor {
   sourceChanged() {
     if (!this.attached || this.isOurs()) return;
     this.attached = null;
+    this.provide();
     this.say(t("Another data set was chosen, so the editor no longer draws from {name}. Edit anything to draw from it again.", { name: this.session?.source.name ?? "" }));
   }
 
@@ -431,6 +450,7 @@ class ModEditor {
         if (hash !== this.attached.hash) {
           const source = gd.rehash(hash);
           this.attached = { profile: this.attached.profile, hash, label: this.attachedLabel(source?.label ?? "", hash) };
+          this.provide();
         }
       }
       const edited = await session.edited();

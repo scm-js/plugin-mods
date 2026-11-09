@@ -1,7 +1,7 @@
 {
   "name": "Mod Editor",
   "id": "mods",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Open a mod (a folder, an .mpq, a mod's .exe or a .zip) and edit its tables, strings, animation scripts and AI scripts beside the map. The editor draws with the mod's files as you change them: change a unit's hit points and the Unit Settings default follows. Save as an MPQ or as a folder of text, see what changed, check it, and play it on the play page.",
   "author": "Jeany",
   "homepage": "https://github.com/scm-js/plugin-mods",
