@@ -7355,9 +7355,9 @@ function applyTextEntry(file, schema, entry) {
         const flag = key.slice(name.length + 1);
         let bit = text.names.indexOf(flag);
         if (bit < 0 || !flag) {
-          const hex5 = /^flag_0x([0-9a-fA-F]+)$/.exec(flag);
-          const mask = hex5 ? parseInt(hex5[1], 16) : 0;
-          if (!hex5 || mask === 0 || (mask & mask - 1) !== 0) throw new DatTextError(`${name} has no flag ${flag}`, line);
+          const hex6 = /^flag_0x([0-9a-fA-F]+)$/.exec(flag);
+          const mask = hex6 ? parseInt(hex6[1], 16) : 0;
+          if (!hex6 || mask === 0 || (mask & mask - 1) !== 0) throw new DatTextError(`${name} has no flag ${flag}`, line);
           bit = Math.log2(mask);
         }
         if (value) v = (v | 2 ** bit) >>> 0;
@@ -9432,13 +9432,13 @@ var ISCRIPT_OPCODES = [
 var BY_NAME = /* @__PURE__ */ new Map();
 for (const o of ISCRIPT_OPCODES) BY_NAME.set(o.name, o);
 for (const o of ISCRIPT_OPCODES.filter((o2) => o2.name.startsWith("__"))) {
-  const hex5 = o.name.slice(2);
+  const hex6 = o.name.slice(2);
   for (const alias of [
-    `unused_${hex5}`,
-    `unknown_${hex5}`,
-    `unk_${hex5}`,
-    `unused${hex5}`,
-    `unknown${hex5}`
+    `unused_${hex6}`,
+    `unknown_${hex6}`,
+    `unk_${hex6}`,
+    `unused${hex6}`,
+    `unknown${hex6}`
   ]) BY_NAME.set(alias, o);
 }
 var ISCRIPT_ANIMS = [
@@ -12948,6 +12948,41 @@ function readZip(b) {
   }
   return out;
 }
+var hex3 = (b) => [...new Uint8Array(b)].map((x3) => x3.toString(16).padStart(2, "0")).join("");
+var sha256 = async (bytes) => hex3(await crypto.subtle.digest("SHA-256", bytes));
+var fileDigest = (bytes) => sha256(bytes);
+var isPluginFile = (name) => /\.(qdp|bwl)$/i.test(name);
+var isFiregraftProject = (name) => /\.fgp$/i.test(name);
+var leafOf$1 = (path) => path.split(/[\\/]/).pop();
+var pluginLine = (name, sha2563) => `plugins\\${leafOf$1(name).toLowerCase()}	${sha2563}`;
+var firegraftLine = (name, sha2563) => `${leafOf$1(name).toLowerCase()}	${sha2563}`;
+async function hashLines(lines) {
+  const name = (l) => l.slice(0, l.indexOf("	"));
+  const sorted = [...lines].sort((a2, b) => name(a2) < name(b) ? -1 : name(a2) > name(b) ? 1 : 0);
+  return (await fileDigest(new TextEncoder().encode(sorted.join("\n")))).slice(0, 16);
+}
+async function modHashOfDigests(input) {
+  const game = /* @__PURE__ */ new Map();
+  for (const f of input.files) game.set(gameName(f.name), f.sha256);
+  const once = (list, keep, line) => {
+    const seen = /* @__PURE__ */ new Set(), out = [];
+    for (const f of list) {
+      const key = leafOf$1(f.name).toLowerCase();
+      if (!keep(f.name) || seen.has(key)) continue;
+      seen.add(key);
+      out.push(line(f.name, f.sha256));
+    }
+    return out;
+  };
+  const lines = [...[...game].map(([name, sha]) => `${name}	${sha}`), ...once(input.firegraft ?? [], isFiregraftProject, firegraftLine)].sort();
+  const pluginLines = once(input.plugins ?? [], isPluginFile, pluginLine).sort();
+  return {
+    hash: await hashLines([...lines, ...pluginLines]),
+    withoutPlugins: await hashLines(lines),
+    lines,
+    pluginLines
+  };
+}
 var latin = new TextDecoder("windows-1252");
 var MOD_MANIFEST = "mod.json";
 var DEFAULT_PALETTE = "jungle";
@@ -13011,8 +13046,8 @@ var ModFolderError = class extends Error {
   }
 };
 function folderPath(member) {
-  const hex5 = (c2) => `%${c2.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
-  const escape = (part) => [...part].map((c2) => c2.charCodeAt(0) < 32 || /[<>:"|?*%]/.test(c2) ? hex5(c2) : c2).join("");
+  const hex6 = (c2) => `%${c2.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
+  const escape = (part) => [...part].map((c2) => c2.charCodeAt(0) < 32 || /[<>:"|?*%]/.test(c2) ? hex6(c2) : c2).join("");
   return member.replace(/\\/g, "/").replace(/^\/+/, "").split("/").map((part) => part === "." || part === ".." ? part.replace(/\./g, "%2E") : escape(part)).join("/");
 }
 function memberPath(path) {
@@ -16910,6 +16945,8 @@ var ModSession = class _ModSession {
   editListeners = /* @__PURE__ */ new Set();
   opened = null;
   digests = /* @__PURE__ */ new Map();
+  /** The digests of the plugins and FireGraft project the mod carries, which no edit changes. */
+  carried = null;
   /** Whether a member is byte for byte the game's, once asked. */
   baseSame = /* @__PURE__ */ new Map();
   constructor(source, options) {
@@ -17311,26 +17348,37 @@ var ModSession = class _ModSession {
     return out;
   }
   /**
-   * The data set's hash over the changed members, by the shared rule (sorted `name<TAB>sha256` lines, the first sixteen
-   * hex digits). Each member's digest is kept until it changes, so after an edit only that member is read again.
+   * The mod's hash by the rule the play page, `scmjs mod info` and the editor's data sets share (core's
+   * `modHashOfDigests`; docs/mods.md, "The mod's hash"): a line for every game file the mod provides as it is now, one
+   * for each plugin it carries as a file (a plugin inside its archive is not loaded by the play page, so not a line)
+   * and one for its FireGraft project. Never compared with the game's own files: the play page finds the mod it keeps
+   * by this hash. A member that cannot be read (listed by its archive and not in it) is left out, as the page leaves
+   * it. Each member's digest is kept until it changes, so after an edit only that member is read again.
    */
   async hash() {
-    const lines = [];
-    for (const k of await this.changedMembers()) {
+    const files = [];
+    for (const k of this.members()) {
+      if (!this.has(k)) continue;
       let d = this.digests.get(k);
       if (!d) {
-        const bytes = await this.read(k);
+        let bytes = null;
+        try {
+          bytes = await this.read(k);
+        } catch {
+        }
         if (!bytes) continue;
-        d = await sha256(bytes);
+        d = await sha2562(bytes);
         this.digests.set(k, d);
       }
-      lines.push(`${k}	${d}`);
+      files.push({ name: k, sha256: d });
     }
-    lines.sort((a2, b) => {
-      const x3 = a2.split("	")[0], y = b.split("	")[0];
-      return x3 < y ? -1 : x3 > y ? 1 : 0;
-    });
-    return (await sha256(new TextEncoder().encode(lines.join("\n")))).slice(0, 16);
+    this.carried ??= (async () => {
+      const plugins = [], firegraft = [];
+      for (const p of this.source.plugins) if (!p.member) plugins.push({ name: p.name, sha256: await sha2562(await p.read()) });
+      for (const p of this.source.firegraft) if (/\.fgp$/i.test(p.name)) firegraft.push({ name: p.name, sha256: await sha2562(await p.read()) });
+      return { plugins, firegraft };
+    })();
+    return (await modHashOfDigests({ files, ...await this.carried })).hash;
   }
   /** Every iscript id the mod's scripts define now, for the completion and the tables' references. */
   async iscriptIds() {
@@ -17398,7 +17446,7 @@ var ModSession = class _ModSession {
   }
 };
 var cloneDat = (file) => ({ ...file, columns: Object.fromEntries(Object.entries(file.columns).map(([k, v]) => [k, v.slice()])) });
-async function sha256(bytes) {
+async function sha2562(bytes) {
   const d = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(d)].map((x3) => x3.toString(16).padStart(2, "0")).join("");
 }
@@ -18051,7 +18099,7 @@ function checkRow(b, i2) {
   if (!ACTIONS[b.action]) throw new GraftError(`button ${i2 + 1}: no action ${b.action}`);
   for (const k of ["icon", "conditionParam", "actionParam", "enabledString", "disabledString"]) if (!u163(b[k])) throw new GraftError(`button ${i2 + 1}: ${k} is a whole number from 0 to 65535`);
 }
-var hex3 = (w) => `0x${w.toString(16).toUpperCase().padStart(4, "0")}`;
+var hex5 = (w) => `0x${w.toString(16).toUpperCase().padStart(4, "0")}`;
 var unitText = (names, type) => {
   const n = names(type);
   return n ? `${n} (${type})` : `(${type})`;
@@ -18063,7 +18111,7 @@ function requirementLines(words2, names) {
     const w = body[i2], op = OPCODES[w];
     if (w === 65535) out.push("end");
     else if (w < 65280) out.push(`owns ${unitText(names, w)}`);
-    else if (!op) out.push(hex3(w));
+    else if (!op) out.push(hex5(w));
     else if (op.takes && i2 + 1 < body.length) out.push(`${op.name} ${unitText(names, body[++i2])}`);
     else out.push(op.name);
   }
