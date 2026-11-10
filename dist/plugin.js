@@ -14480,6 +14480,146 @@ function closing(s, open) {
   return s.length;
 }
 
+// races.ts
+var FIRST_RACE = 8;
+var LAST_RACE = 255;
+var RACE_NAME_MAX = 40;
+var GAME_RACES = [msg2("Zerg"), msg2("Terran"), msg2("Protoss"), msg2("Independent"), msg2("Neutral"), msg2("User Selectable"), msg2("Random"), msg2("Inactive")];
+var GAME_LETTERS = { z: msg2("Zerg"), t: msg2("Terran"), p: msg2("Protoss"), n: msg2("Neutral") };
+function normalizeRaces(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  for (const row of value) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const r2 = row;
+    const id = r2.id;
+    if (typeof id !== "number" || !Number.isInteger(id) || id < FIRST_RACE || id > LAST_RACE || seen.has(id)) continue;
+    const name = typeof r2.name === "string" ? r2.name.trim() : "";
+    if (!name || name.length > RACE_NAME_MAX) continue;
+    const kept = { ...r2, id, name };
+    delete kept.letter;
+    delete kept.like;
+    const letter = typeof r2.letter === "string" && /^[a-z]$/i.test(r2.letter.trim()) ? r2.letter.trim().toLowerCase() : void 0;
+    if (letter) kept.letter = letter;
+    if (r2.like === 0 || r2.like === 1 || r2.like === 2) kept.like = r2.like;
+    seen.add(id);
+    out.push(kept);
+  }
+  return out.sort((a2, b) => a2.id - b.id);
+}
+function sameRaces(a2, b) {
+  return a2.length === b.length && a2.every((r2, i2) => r2.id === b[i2].id && r2.name === b[i2].name && r2.letter === b[i2].letter && r2.like === b[i2].like);
+}
+var emptyDraft = () => ({ id: "", name: "", letter: "", like: "" });
+var draftOf = (r2) => ({ id: String(r2.id), name: r2.name, letter: r2.letter ?? "", like: r2.like === void 0 ? "" : String(r2.like) });
+function checkRow(draft, rows2, editing) {
+  const errors = {};
+  const was = editing === null ? null : rows2.find((r2) => r2.id === editing) ?? null;
+  const idText = draft.id.trim();
+  const id = /^\d+$/.test(idText) ? Number(idText) : NaN;
+  if (!idText) errors.id = t("Give the race's number, from 8 to 255.");
+  else if (!Number.isInteger(id)) errors.id = t("The number is a whole number from 8 to 255.");
+  else if (id < FIRST_RACE) errors.id = t("{n} is the game's own race, {race}. A mod's races are numbered 8 to 255.", { n: id, race: translate(GAME_RACES[id]) });
+  else if (id > LAST_RACE) errors.id = t("A race's number is 255 at most.");
+  else {
+    const other = rows2.find((r2) => r2.id === id && r2.id !== editing);
+    if (other) errors.id = t("Race {n} is already in the table, as {name}.", { n: id, name: other.name });
+  }
+  const name = draft.name.trim();
+  if (!name) errors.name = t("Give the race a name.");
+  else if (name.length > RACE_NAME_MAX) errors.name = t("A name is 40 characters at most; this one has {n}.", { n: name.length });
+  const letter = draft.letter.trim().toLowerCase();
+  if (letter && !/^[a-z]$/.test(letter)) errors.letter = t("The letter is one letter from a to z, or none.");
+  else if (letter && GAME_LETTERS[letter] && letter !== was?.letter) errors.letter = t("{letter} is the letter of the game's own files for {race}.", { letter, race: translate(GAME_LETTERS[letter]) });
+  if (Object.keys(errors).length) return { row: null, errors };
+  const row = { ...was ?? {}, id, name };
+  delete row.letter;
+  delete row.like;
+  if (letter) row.letter = letter;
+  if (draft.like === "0" || draft.like === "1" || draft.like === "2") row.like = Number(draft.like);
+  return { row, errors };
+}
+var RaceTable = class {
+  host;
+  rows;
+  constructor(host, initial = []) {
+    this.host = host;
+    this.rows = normalizeRaces(initial);
+  }
+  /** Whether the editor keeps race names (an editor from before them cannot). */
+  get canKeep() {
+    return typeof this.host.gameData.setRaces === "function";
+  }
+  /** Whether the editor can suggest names and letters from the mod's files, now. */
+  get canHint() {
+    return typeof this.host.gameData.raceCandidates === "function" && this.host.ours();
+  }
+  /** Takes the editor's table for the mod, when it draws from the mod. Whether anything changed. */
+  load() {
+    const g = this.host.gameData;
+    if (typeof g.races !== "function" || !this.host.ours()) return false;
+    const next = normalizeRaces(g.races());
+    if (sameRaces(next, this.rows)) return false;
+    this.rows = next;
+    return true;
+  }
+  /** Adds a row, or replaces the row `editing`; refused (with the reasons) as `checkRow` says. */
+  put(draft, editing = null) {
+    if (!this.canKeep) return { ok: false, errors: {} };
+    const { row, errors } = checkRow(draft, this.rows, editing);
+    if (!row) return { ok: false, errors };
+    this.keep([...this.rows.filter((r2) => r2.id !== editing), row]);
+    return { ok: true, errors };
+  }
+  remove(id) {
+    if (!this.canKeep || !this.rows.some((r2) => r2.id === id)) return false;
+    this.keep(this.rows.filter((r2) => r2.id !== id));
+    return true;
+  }
+  /** The editor's suggestions, for a person to choose from; empty when it gives none. Never written into a row here. */
+  async hints() {
+    const g = this.host.gameData;
+    if (!this.canHint) return { names: [], letters: [] };
+    try {
+      const got = await g.raceCandidates();
+      const taken = new Set(this.rows.map((r2) => r2.name.toLowerCase())), letters = new Set(this.rows.map((r2) => r2.letter));
+      return {
+        names: [...new Set((got?.names ?? []).filter((n) => typeof n === "string" && n.trim()).map((n) => n.trim()))].filter((n) => !taken.has(n.toLowerCase())),
+        letters: (got?.letters ?? []).filter((l) => typeof l === "string" && /^[a-z]$/.test(l) && !GAME_LETTERS[l] && !letters.has(l))
+      };
+    } catch {
+      return { names: [], letters: [] };
+    }
+  }
+  keep(rows2) {
+    this.rows = normalizeRaces(rows2);
+    const id = this.host.profileId();
+    if (id) this.host.gameData.setRaces?.(this.rows, id);
+  }
+};
+var Refusal = class {
+  said = null;
+  say;
+  unsay;
+  constructor(say, unsay) {
+    this.say = say;
+    this.unsay = unsay;
+  }
+  refuse(text) {
+    this.said = text;
+    this.say(text);
+  }
+  /** The row changed (a field typed in, a hint taken, Cancel, another row chosen, a row kept). */
+  changed() {
+    if (this.said === null) return;
+    const text = this.said;
+    this.said = null;
+    this.unsay(text);
+  }
+};
+var racesApi = (gameData) => gameData;
+
 // source.ts
 var SYSTEM_FILES = {
   names: ["desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store", "icon\r", ".directory"],
@@ -14531,7 +14671,7 @@ function gameCopies(gameCopy) {
 var OpenError = class extends Error {
 };
 function emptySource(kind, name) {
-  return { kind, name, layers: [], files: /* @__PURE__ */ new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null };
+  return { kind, name, layers: [], files: /* @__PURE__ */ new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null, races: [] };
 }
 function probeNames(archive) {
   const names = /* @__PURE__ */ new Set();
@@ -14593,6 +14733,7 @@ async function fromPieces(kind, name, pieces) {
   const loose = [];
   const archives = [];
   let modName = null;
+  let races = [];
   const take = async (list, depth) => {
     const copy = depth === 0 && kind !== "folder" ? /* @__PURE__ */ new Set() : gameCopyFiles(list.map((p) => p.path));
     for (const p of list) {
@@ -14615,8 +14756,11 @@ async function fromPieces(kind, name, pieces) {
       }
       if (l === "mod.json" && p.path.split("/").length <= 2) {
         try {
-          const n = JSON.parse(new TextDecoder().decode(await p.read())).name;
+          const json = JSON.parse(new TextDecoder().decode(await p.read()));
+          const n = json?.name;
           if (typeof n === "string" && n.trim()) modName = n.trim();
+          const declared = normalizeRaces(json?.races);
+          if (declared.length) races = declared;
         } catch {
         }
         continue;
@@ -14700,6 +14844,7 @@ async function fromPieces(kind, name, pieces) {
   }
   if (kind === "folder" && source.exes.length === 1) source.name = leaf(source.exes[0].file).replace(/\.exe$/i, "");
   if (modName) source.name = modName;
+  source.races = races;
   source.gameCopy.sort((a2, b) => a2 < b ? -1 : a2 > b ? 1 : 0);
   const underGameFolder = (path) => path.toLowerCase().split("/").slice(0, -1).some((f) => f !== "maps" && GAME_FOLDERS.includes(f));
   if (source.gameCopy.length && !archives.length && !source.plugins.length && !source.firegraft.length && !loose.some((p) => underGameFolder(p.path))) {
@@ -14724,6 +14869,7 @@ async function findTextFolder(pieces) {
 async function openTextFolder(root, manifest, pieces, name, base) {
   const source = emptySource("mod folder", manifest.name || name);
   source.manifest = manifest;
+  source.races = normalizeRaces(manifest.races);
   source.layers.push(root ? `${root}/` : "./");
   const inside = pieces.filter((p) => !root || p.path.startsWith(root + "/")).map((p) => ({ ...p, path: root ? p.path.slice(root.length + 1) : p.path }));
   let names;
@@ -15207,7 +15353,48 @@ var KO = {
   "No test game is running: edits stay in the mod until the next one.": "\uC2E4\uD589 \uC911\uC778 \uD14C\uC2A4\uD2B8 \uAC8C\uC784\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1\uC740 \uB2E4\uC74C \uD14C\uC2A4\uD2B8 \uAC8C\uC784\uAE4C\uC9C0 \uBAA8\uB4DC\uC5D0 \uB0A8\uC2B5\uB2C8\uB2E4.",
   "Blank map": "\uBE48 \uB9F5",
   "The test game is running with {name}: each edit goes into it.": "{name|\uC73C\uB85C} \uD14C\uC2A4\uD2B8 \uAC8C\uC784\uC774 \uC2E4\uD589 \uC911\uC785\uB2C8\uB2E4. \uD3B8\uC9D1\uD560 \uB54C\uB9C8\uB2E4 \uAC8C\uC784\uC5D0 \uB4E4\uC5B4\uAC11\uB2C8\uB2E4.",
-  "The play page has {name}; choose a map there.": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uC5D0 {name|\uC774} \uC788\uC2B5\uB2C8\uB2E4. \uAC70\uAE30\uC11C \uB9F5\uC744 \uACE0\uB974\uC138\uC694."
+  "The play page has {name}; choose a map there.": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uC5D0 {name|\uC774} \uC788\uC2B5\uB2C8\uB2E4. \uAC70\uAE30\uC11C \uB9F5\uC744 \uACE0\uB974\uC138\uC694.",
+  "Races": "\uC885\uC871",
+  "Zerg": "\uC800\uADF8",
+  "Terran": "\uD14C\uB780",
+  "Protoss": "\uD504\uB85C\uD1A0\uC2A4",
+  "Independent": "\uB3C5\uB9BD",
+  "Neutral": "\uC911\uB9BD",
+  "User Selectable": "\uC0AC\uC6A9\uC790 \uC120\uD0DD",
+  "Random": "\uBB34\uC791\uC704",
+  "Inactive": "\uBE44\uD65C\uC131",
+  "Give the race's number, from 8 to 255.": "\uC885\uC871 \uBC88\uD638\uB97C 8\uC5D0\uC11C 255 \uC0AC\uC774\uB85C \uC801\uC73C\uC138\uC694.",
+  "The number is a whole number from 8 to 255.": "\uBC88\uD638\uB294 8\uC5D0\uC11C 255 \uC0AC\uC774\uC758 \uC815\uC218\uC785\uB2C8\uB2E4.",
+  "{n} is the game's own race, {race}. A mod's races are numbered 8 to 255.": "{n}\uBC88\uC740 \uAC8C\uC784\uC758 \uC885\uC871 {race}\uC785\uB2C8\uB2E4. \uBAA8\uB4DC\uC758 \uC885\uC871\uC740 8\uBC88\uBD80\uD130 255\uBC88\uAE4C\uC9C0\uC785\uB2C8\uB2E4.",
+  "A race's number is 255 at most.": "\uC885\uC871 \uBC88\uD638\uB294 255\uAE4C\uC9C0\uC785\uB2C8\uB2E4.",
+  "Race {n} is already in the table, as {name}.": "\uC885\uC871 {n}\uBC88\uC740 \uC774\uBBF8 \uD45C\uC5D0 {name|\uC73C\uB85C} \uC788\uC2B5\uB2C8\uB2E4.",
+  "Give the race a name.": "\uC885\uC871 \uC774\uB984\uC744 \uC801\uC73C\uC138\uC694.",
+  "A name is 40 characters at most; this one has {n}.": "\uC774\uB984\uC740 40\uC790\uAE4C\uC9C0\uC785\uB2C8\uB2E4. \uC9C0\uAE08 {n}\uC790\uC785\uB2C8\uB2E4.",
+  "The letter is one letter from a to z, or none.": "\uAE00\uC790\uB294 a\uBD80\uD130 z\uAE4C\uC9C0 \uC911 \uD55C \uAE00\uC790\uC774\uAC70\uB098 \uBE44\uC6CC \uB461\uB2C8\uB2E4.",
+  "{letter} is the letter of the game's own files for {race}.": "{letter|\uC740} \uAC8C\uC784 \uC790\uCCB4\uC758 {race} \uD30C\uC77C\uC774 \uC4F0\uB294 \uAE00\uC790\uC785\uB2C8\uB2E4.",
+  "A mod can give players races past the game's own. Its files do not say what they are called, so name them here: the editor then shows the name wherever a player's race is shown, and saving the mod as a folder writes them into its mod.json. The mod's files and its hash do not change.": "\uBAA8\uB4DC\uB294 \uAC8C\uC784\uC758 \uC885\uC871 \uC678\uC5D0 \uB2E4\uB978 \uC885\uC871\uC744 \uD50C\uB808\uC774\uC5B4\uC5D0\uAC8C \uC904 \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uADF8 \uC774\uB984\uC740 \uBAA8\uB4DC\uC758 \uD30C\uC77C\uC5D0 \uC5C6\uC73C\uB2C8 \uC5EC\uAE30\uC11C \uC774\uB984\uC744 \uBD99\uC774\uC138\uC694. \uD3B8\uC9D1\uAE30\uB294 \uD50C\uB808\uC774\uC5B4\uC758 \uC885\uC871\uC774 \uBCF4\uC774\uB294 \uACF3\uB9C8\uB2E4 \uADF8 \uC774\uB984\uC744 \uBCF4\uC5EC \uC8FC\uACE0, \uBAA8\uB4DC\uB97C \uD3F4\uB354\uB85C \uC800\uC7A5\uD558\uBA74 mod.json\uC5D0 \uAE30\uB85D\uB429\uB2C8\uB2E4. \uBAA8\uB4DC\uC758 \uD30C\uC77C\uACFC \uD574\uC2DC\uB294 \uBC14\uB00C\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
+  "This editor cannot keep race names; update it to name the races a mod adds. Races in the mod's mod.json are still written back when it is saved as a folder.": "\uC774 \uD3B8\uC9D1\uAE30\uB294 \uC885\uC871 \uC774\uB984\uC744 \uBCF4\uAD00\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uBAA8\uB4DC\uAC00 \uCD94\uAC00\uD558\uB294 \uC885\uC871\uC5D0 \uC774\uB984\uC744 \uBD99\uC774\uB824\uBA74 \uD3B8\uC9D1\uAE30\uB97C \uC5C5\uB370\uC774\uD2B8\uD558\uC138\uC694. \uBAA8\uB4DC\uC758 mod.json\uC5D0 \uC788\uB294 \uC885\uC871\uC740 \uD3F4\uB354\uB85C \uC800\uC7A5\uD560 \uB54C \uADF8\uB300\uB85C \uB2E4\uC2DC \uAE30\uB85D\uB429\uB2C8\uB2E4.",
+  "Number": "\uBC88\uD638",
+  "Letter of its files": "\uD30C\uC77C \uAE00\uC790",
+  "Plays as": "\uAC8C\uC784\uC5D0\uC11C\uC758 \uC885\uC871",
+  "not said": "\uC815\uD558\uC9C0 \uC54A\uC74C",
+  "Edit": "\uD3B8\uC9D1",
+  "Remove this race": "\uC774 \uC885\uC871 \uC9C0\uC6B0\uAE30",
+  "No races are named for this mod.": "\uC774 \uBAA8\uB4DC\uC5D0 \uC774\uB984 \uBD99\uC740 \uC885\uC871\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "A race's number is not in any of the mod's files. To find it, open a replay or a map made with the mod: a player whose race has no name here shows as Race and the number, such as Race 9.": "\uC885\uC871 \uBC88\uD638\uB294 \uBAA8\uB4DC\uC758 \uC5B4\uB290 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4. \uBC88\uD638\uB97C \uC54C\uB824\uBA74 \uADF8 \uBAA8\uB4DC\uB85C \uB9CC\uB4E0 \uB9AC\uD50C\uB808\uC774\uB098 \uB9F5\uC744 \uC5EC\uC138\uC694. \uC5EC\uAE30\uC11C \uC774\uB984\uC774 \uC5C6\uB294 \uC885\uC871\uC758 \uD50C\uB808\uC774\uC5B4\uB294 '\uC885\uC871 9'\uCC98\uB7FC \uC885\uC871\uACFC \uBC88\uD638\uB85C \uBCF4\uC785\uB2C8\uB2E4.",
+  "Add": "\uCD94\uAC00",
+  "Save Changes": "\uBCC0\uACBD \uC800\uC7A5",
+  "The race's number: 8 to 255": "\uC885\uC871 \uBC88\uD638: 8\uC5D0\uC11C 255",
+  "The lower-case letter its own files go by, as in game\\<letter>console.pcx; empty when it has none": "\uADF8 \uC885\uC871 \uD30C\uC77C\uC774 \uC4F0\uB294 \uC18C\uBB38\uC790 \uD55C \uAE00\uC790(game\\<\uAE00\uC790>console.pcx\uCC98\uB7FC). \uC5C6\uC73C\uBA74 \uBE44\uC6CC \uB461\uB2C8\uB2E4",
+  "New race": "\uC0C8 \uC885\uC871",
+  "Race {n}": "\uC885\uC871 {n}",
+  "Letter": "\uAE00\uC790",
+  "Found in the mod's files: names its network.tbl has past the game's own, and letters it has a console picture or status buttons for. They are guesses; check one before you use it.": "\uBAA8\uB4DC\uC758 \uD30C\uC77C\uC5D0\uC11C \uCC3E\uC740 \uAC83: network.tbl\uC5D0\uC11C \uAC8C\uC784 \uC790\uCCB4\uC758 \uD56D\uBAA9 \uB4A4\uC5D0 \uC788\uB294 \uC774\uB984\uACFC, \uCF58\uC194 \uADF8\uB9BC\uC774\uB098 \uC0C1\uD0DC \uBC84\uD2BC \uD30C\uC77C\uC774 \uC788\uB294 \uAE00\uC790\uC785\uB2C8\uB2E4. \uCD94\uCE21\uC77C \uBFD0\uC774\uB2C8 \uC4F0\uAE30 \uC804\uC5D0 \uD655\uC778\uD558\uC138\uC694.",
+  "Use this name": "\uC774 \uC774\uB984 \uC4F0\uAE30",
+  "Use this letter": "\uC774 \uAE00\uC790 \uC4F0\uAE30",
+  "Race {n} added: {name}.": "\uC885\uC871 {n}\uBC88\uC744 \uCD94\uAC00\uD588\uC2B5\uB2C8\uB2E4: {name}.",
+  "Race {n} changed.": "\uC885\uC871 {n}\uBC88\uC744 \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
+  "Race {n} removed: {name}.": "\uC885\uC871 {n}\uBC88\uC744 \uC9C0\uC6E0\uC2B5\uB2C8\uB2E4: {name}."
 };
 
 // monaco.ts
@@ -15330,7 +15517,8 @@ function playMessage(h2) {
     dataSet: {
       name: h2.name,
       hash: h2.hash,
-      files: h2.files.map((f) => ({ path: f.name.toLowerCase().replace(/\\/g, "/"), file: new File([f.bytes], f.name.split("\\").pop()) }))
+      files: h2.files.map((f) => ({ path: f.name.toLowerCase().replace(/\\/g, "/"), file: new File([f.bytes], f.name.split("\\").pop()) })),
+      ...h2.races?.length ? { races: h2.races.map((r2) => ({ ...r2 })) } : {}
     },
     ...h2.map ? { map: h2.map.bytes.slice(), name: h2.map.name } : {}
   };
@@ -15421,7 +15609,7 @@ async function writeMpq(members, compression = "zlib") {
   for (const m of members) creator.addFile(m.member, m.data, { compress: compression === "none" ? false : compression });
   return creator.writeAsync();
 }
-async function textFolder(session, progress) {
+async function textFolder(session, progress, races = session.source.races) {
   const manifest = emptyManifest(session.source.name);
   manifest.layers = [...session.source.layers];
   manifest.palette = session.source.manifest?.palette ?? DEFAULT_PALETTE;
@@ -15486,6 +15674,8 @@ async function textFolder(session, progress) {
   if (session.source.probed.length) manifest.notes.push(`${session.source.probed.join(", ")} had no list of its files: only the names the game reads were found in it`);
   if (!palette) manifest.notes.push(`no palette ${manifest.palette} was found (the mod's tileset\\${manifest.palette}.wpe, or the game's): the GRPs are kept as bytes`);
   tidyManifest(manifest);
+  const declared = normalizeRaces(races);
+  if (declared.length) manifest.races = declared;
   files.push({ file: MOD_MANIFEST, data: new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}
 `) });
   files.sort((a2, b) => a2.file < b.file ? -1 : a2.file > b.file ? 1 : 0);
@@ -16489,6 +16679,188 @@ var PicturesView = class {
     } catch (err2) {
       this.ctx.say(t("Not saved: {error}", { error: err2.message }));
     }
+  }
+};
+
+// racesView.ts
+var RacesView = class {
+  el;
+  /** What scrolls when the tab is taller than the panel (the tab itself only fills it, as the other tabs do). */
+  scroller;
+  table;
+  say;
+  /** A refusal said in the status line on Add, taken back once the row changes. */
+  refusal;
+  /** The row being edited: its id, or null for a new row. */
+  editing = null;
+  draft = emptyDraft();
+  /** After Add was pressed and refused: every field's reason shown, an empty one's too. */
+  showAll = false;
+  hints = { names: [], letters: [] };
+  asked = 0;
+  /** `unsay` clears the status line when it still says `text`. */
+  constructor(table, say, unsay) {
+    this.table = table;
+    this.say = say;
+    this.refusal = new Refusal(say, unsay);
+    this.scroller = h("div", { className: "mx-races", style: "flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px" });
+    this.el = h("div", { className: "mx-col", style: "flex: 1" }, this.scroller);
+  }
+  /** The table may have changed (the editor's, a load): draw it again, and ask for the hints again. */
+  refresh() {
+    this.draw();
+    const asked = ++this.asked;
+    void this.table.hints().then((hints) => {
+      if (asked !== this.asked) return;
+      this.hints = hints;
+      this.draw();
+    });
+  }
+  draw() {
+    const el = this.scroller, top = el.scrollTop;
+    clear(el);
+    const rows2 = this.table.rows, keeps = this.table.canKeep;
+    el.append(h("p", { className: "mx-dim" }, t("A mod can give players races past the game's own. Its files do not say what they are called, so name them here: the editor then shows the name wherever a player's race is shown, and saving the mod as a folder writes them into its mod.json. The mod's files and its hash do not change.")));
+    if (!keeps) el.append(h("p", { className: "mx-warn" }, t("This editor cannot keep race names; update it to name the races a mod adds. Races in the mod's mod.json are still written back when it is saved as a folder.")));
+    const grid = h(
+      "table",
+      { className: "mx-form", style: "border-collapse: collapse; margin: 4px 0" },
+      h("tr", null, ...[t("Number"), t("Name"), t("Letter of its files"), t("Plays as"), ""].map((x3) => h("th", { style: "text-align: left; padding: 2px 8px 2px 0" }, x3)))
+    );
+    for (const r2 of rows2) {
+      grid.append(h(
+        "tr",
+        { dataset: { race: String(r2.id) }, className: this.editing === r2.id ? "on" : "" },
+        h("td", { style: "padding: 1px 8px 1px 0; font-variant-numeric: tabular-nums" }, String(r2.id)),
+        h("td", { style: "padding: 1px 8px 1px 0" }, r2.name),
+        h("td", { style: "padding: 1px 8px 1px 0" }, r2.letter ?? h("span", { className: "mx-faint" }, t("none"))),
+        h("td", { style: "padding: 1px 8px 1px 0" }, r2.like === void 0 ? h("span", { className: "mx-faint" }, t("not said")) : translate(GAME_RACES[r2.like])),
+        h(
+          "td",
+          { style: "white-space: nowrap" },
+          keeps ? button(t("Edit"), () => {
+            this.editing = r2.id;
+            this.draft = draftOf(r2);
+            this.showAll = false;
+            this.refusal.changed();
+            this.draw();
+          }) : null,
+          " ",
+          keeps ? button("\xD7", () => this.remove(r2.id), { title: t("Remove this race") }) : null
+        )
+      ));
+    }
+    if (!rows2.length) grid.append(h("tr", null, h("td", { colSpan: 5, className: "mx-faint", style: "padding: 2px 0" }, t("No races are named for this mod."))));
+    el.append(grid);
+    if (keeps) el.append(this.form());
+    el.append(h("p", { className: "mx-faint" }, t("A race's number is not in any of the mod's files. To find it, open a replay or a map made with the mod: a player whose race has no name here shows as Race and the number, such as Race 9.")));
+    el.scrollTop = top;
+  }
+  /** The row being added or edited, each field's refusal beside it as it is typed. */
+  form() {
+    const d = this.draft;
+    const errorsEl = h("div", { className: "mx-danger" });
+    const save = button(this.editing === null ? t("Add") : t("Save Changes"), () => this.put(), { primary: true });
+    const inputs = {
+      id: h("input", { type: "text", inputMode: "numeric", value: d.id, placeholder: "8\u2013255", style: "width: 64px", title: t("The race's number: 8 to 255") }),
+      name: h("input", { type: "text", value: d.name, style: "width: 180px", maxLength: 60 }),
+      letter: h("input", { type: "text", value: d.letter, style: "width: 36px", maxLength: 1, title: t("The lower-case letter its own files go by, as in game\\<letter>console.pcx; empty when it has none") })
+    };
+    const like = h(
+      "select",
+      { onchange: () => {
+        this.draft.like = like.value;
+        this.refusal.changed();
+      } },
+      h("option", { value: "" }, t("not said")),
+      ...[0, 1, 2].map((v) => h("option", { value: String(v) }, translate(GAME_RACES[v])))
+    );
+    like.value = d.like;
+    const check = () => {
+      const { errors } = checkRow(this.draft, this.table.rows, this.editing);
+      const shown = (f) => this.showAll || this.draft[f].trim() || this.editing !== null ? errors[f] : void 0;
+      clear(errorsEl);
+      for (const f of ["id", "name", "letter"]) {
+        const why = shown(f);
+        inputs[f].classList.toggle("bad", !!why);
+        if (why) errorsEl.append(h("div", null, why));
+      }
+      save.disabled = ["id", "name", "letter"].some((f) => shown(f));
+    };
+    for (const f of ["id", "name", "letter"]) inputs[f].addEventListener("input", () => {
+      this.draft[f] = inputs[f].value;
+      this.refusal.changed();
+      check();
+    });
+    inputs.name.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.put();
+    });
+    check();
+    const box = h(
+      "div",
+      { style: "border-top: 1px solid var(--border, #2c3341); padding-top: 4px" },
+      h(
+        "div",
+        { className: "mx-bar" },
+        h("b", null, this.editing === null ? t("New race") : t("Race {n}", { n: this.editing })),
+        h("label", null, t("Number"), inputs.id),
+        h("label", null, t("Name"), inputs.name),
+        h("label", null, t("Letter"), inputs.letter),
+        h("label", null, t("Plays as"), like),
+        save,
+        this.editing !== null ? button(t("Cancel"), () => {
+          this.editing = null;
+          this.draft = emptyDraft();
+          this.showAll = false;
+          this.refusal.changed();
+          this.draw();
+        }) : null
+      ),
+      errorsEl
+    );
+    const { names, letters } = this.hints;
+    if (names.length || letters.length) {
+      const take = (f, value) => {
+        this.draft[f] = value;
+        inputs[f].value = value;
+        this.refusal.changed();
+        check();
+      };
+      box.append(h("p", { className: "mx-dim", style: "margin: 4px 0 2px" }, t("Found in the mod's files: names its network.tbl has past the game's own, and letters it has a console picture or status buttons for. They are guesses; check one before you use it.")));
+      if (names.length) box.append(h("div", { className: "mx-bar", dataset: { hints: "name" } }, h("span", { className: "mx-dim" }, t("Name")), ...names.map((n) => button(n, () => take("name", n), { title: t("Use this name") }))));
+      if (letters.length) box.append(h("div", { className: "mx-bar", dataset: { hints: "letter" } }, h("span", { className: "mx-dim" }, t("Letter")), ...letters.map((l) => button(l, () => take("letter", l), { title: t("Use this letter") }))));
+    }
+    return box;
+  }
+  put() {
+    const editing = this.editing;
+    const { ok, errors } = this.table.put(this.draft, editing);
+    if (!ok) {
+      const first = Object.values(errors)[0];
+      if (first) this.refusal.refuse(first);
+      this.showAll = true;
+      this.draw();
+      return;
+    }
+    const id = Number(this.draft.id.trim());
+    this.refusal.changed();
+    this.say(editing === null ? t("Race {n} added: {name}.", { n: id, name: this.draft.name.trim() }) : t("Race {n} changed.", { n: id }));
+    this.editing = null;
+    this.draft = emptyDraft();
+    this.showAll = false;
+    this.refresh();
+  }
+  remove(id) {
+    const was = this.table.rows.find((r2) => r2.id === id);
+    if (!this.table.remove(id)) return;
+    if (this.editing === id) {
+      this.editing = null;
+      this.draft = emptyDraft();
+      this.showAll = false;
+    }
+    this.refusal.changed();
+    this.say(t("Race {n} removed: {name}.", { n: id, name: was?.name ?? "" }));
+    this.refresh();
   }
 };
 
@@ -18131,7 +18503,7 @@ var ButtonsDoc = class _ButtonsDoc {
   }
   /** A unit's buttons replaced by `rows`: in place when it owns its run and the count is the same, else in a new run at the end. */
   setRows(unit, rows2) {
-    for (const [i2, b] of rows2.entries()) checkRow(b, i2);
+    for (const [i2, b] of rows2.entries()) checkRow2(b, i2);
     while (this.graft.sets.length <= unit) this.graft.sets.push({ count: 0, first: 0, connected: 65535 });
     const s = this.graft.sets[unit];
     if (s.count === rows2.length && s.count && !this.sharedWith(unit).length) {
@@ -18169,7 +18541,7 @@ var ButtonsDoc = class _ButtonsDoc {
   }
 };
 var byPosition = (rows2) => rows2.map((b, i2) => ({ b, i: i2 })).sort((x3, y) => x3.b.position - y.b.position || x3.i - y.i).map((x3) => x3.b);
-function checkRow(b, i2) {
+function checkRow2(b, i2) {
   const u163 = (v) => Number.isInteger(v) && v >= 0 && v <= 65535;
   if (!Number.isInteger(b.position) || b.position < 1 || b.position > 9) throw new GraftError(`button ${i2 + 1}: a place is 1 to 9`);
   if (!CONDITIONS[b.condition]) throw new GraftError(`button ${i2 + 1}: no condition ${b.condition}`);
@@ -19204,6 +19576,9 @@ var ModEditor = class {
   sounds = null;
   overlays = null;
   grafts = null;
+  racesView = null;
+  /** The races the open mod adds (`races.ts`): from its `mod.json`, then the editor's table for it. */
+  races = null;
   /** Edits into a running test game (`live.ts`). */
   live = new LiveSender(() => this.status());
   liveSvc = null;
@@ -19285,6 +19660,7 @@ var ModEditor = class {
     this.sounds = null;
     this.overlays = null;
     this.grafts = null;
+    this.racesView = null;
   }
   draw() {
     const body = this.body;
@@ -19302,7 +19678,7 @@ var ModEditor = class {
       this.tab = id;
       this.draw();
     } }, label);
-    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("pictures", t("Pictures")), tabButton("sounds", t("Sounds")), tabButton("scripts", t("Scripts")), tabButton("overlays", t("Overlays")), tabButton("grafts", t("Requirements and Buttons")));
+    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("pictures", t("Pictures")), tabButton("sounds", t("Sounds")), tabButton("scripts", t("Scripts")), tabButton("overlays", t("Overlays")), tabButton("grafts", t("Requirements and Buttons")), tabButton("races", t("Races")));
     const bar = h(
       "div",
       { className: "mx-bar" },
@@ -19358,6 +19734,13 @@ var ModEditor = class {
       this.strings ??= new StringsView(this.context());
       this.strings.refresh();
       return this.strings.el;
+    }
+    if (tab === "races") {
+      this.racesView ??= new RacesView(this.races, (text) => this.say(text), (text) => {
+        if (this.said === text) this.say("");
+      });
+      this.racesView.refresh();
+      return this.racesView.el;
     }
     this.look ??= new Look(this.session);
     if (tab === "pictures") {
@@ -19471,6 +19854,7 @@ var ModEditor = class {
       const source = await openPieces(pieces, name, base);
       const session = await ModSession.open(source, { base, baseHas: base ? (m) => this.baseHas(m) : void 0 });
       this.session = session;
+      this.races = new RaceTable({ gameData: racesApi(this.api.gameData), profileId: () => this.session === session ? this.profile().id : null, ours: () => this.session === session && this.isOurs() }, source.races);
       this.found = foundLine(source);
       this.tab = "tables";
       session.onChange(() => this.edited());
@@ -19495,6 +19879,7 @@ var ModEditor = class {
     this.look = null;
     const ours = !!this.attached && this.isOurs();
     this.session = null;
+    this.races = null;
     this.live.follow(null);
     this.attached = null;
     this.reader = null;
@@ -19543,10 +19928,17 @@ var ModEditor = class {
     return !!await this.baseRead(member);
   }
   /* ── Drawing from the mod ── */
+  /**
+   * The profile the mod is attached under. It carries the races the panel has for the mod (from its `mod.json`, or as
+   * the person named them), so the editor keeps them for the id; with none it carries no `races`, and the editor keeps
+   * what it had for the id. (An editor from before races a data set adds ignores the field.)
+   */
   profile() {
     const name = this.session.source.name;
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "mod";
-    return { id, name };
+    const races = this.races?.rows ?? [];
+    const profile = { id, name, ...races.length ? { races: races.map((r2) => ({ ...r2 })) } : {} };
+    return profile;
   }
   isOurs() {
     const s = this.api.gameData.source();
@@ -19573,6 +19965,7 @@ var ModEditor = class {
     if (this.session !== session) return;
     const source = await gd.attach(profile, this.reader, hash ? { hash } : void 0);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
+    if (this.races?.load()) this.racesView?.refresh();
     this.provide();
     this.status();
     if (!hash) {
@@ -19590,6 +19983,7 @@ var ModEditor = class {
   }
   /** The editor's data set moved: another was chosen, or ours came back. */
   sourceChanged() {
+    if (this.attached && this.isOurs() && this.races?.load() && this.tab === "races") this.racesView?.refresh();
     if (!this.attached || this.isOurs()) return;
     this.attached = null;
     this.provide();
@@ -19603,6 +19997,7 @@ var ModEditor = class {
     else if (this.tab === "sounds") this.sounds?.refresh();
     else if (this.tab === "overlays") this.overlays?.refresh();
     else if (this.tab === "grafts") this.grafts?.refresh();
+    else if (this.tab === "races") this.racesView?.refresh();
     else this.scripts?.refresh();
     clearTimeout(this.update.timer);
     this.update.timer = window.setTimeout(() => void this.redraw(), 400);
@@ -19660,7 +20055,7 @@ var ModEditor = class {
         fileName = `${s.source.name}.mpq`;
         what = t("{n} files in an MPQ, {size}", { n: num2(members.length), size: sizeText(bytes.length) });
       } else if (form === "folder") {
-        const { files, manifest } = await textFolder(s, (done, total) => progress.report(done / total * 0.9, t("{done} of {total} files\u2026", { done: num2(done), total: num2(total) })));
+        const { files, manifest } = await textFolder(s, (done, total) => progress.report(done / total * 0.9, t("{done} of {total} files\u2026", { done: num2(done), total: num2(total) })), this.races?.rows ?? s.source.races);
         bytes = writeZip(files, s.source.name);
         fileName = `${s.source.name}.zip`;
         const kept = manifest.kept.reduce((n, k) => n + k.files.length, 0);
@@ -19793,7 +20188,8 @@ var ModEditor = class {
         map = { bytes: serializeScenario(createScenario({ width: 64, height: 64, era: 0, name: t("Blank map") })), name: "blank.chk" };
         blank = true;
       }
-      return { map, mod: { name: s.source.name, hash, files: files.map((f) => ({ path: livePath(f.name), bytes: f.bytes })) }, ...blank ? { useMapSettings: true } : {} };
+      const races = this.races?.rows ?? [];
+      return { map, mod: { name: s.source.name, hash, files: files.map((f) => ({ path: livePath(f.name), bytes: f.bytes })), ...races.length ? { races: races.map((r2) => ({ ...r2 })) } : {} }, ...blank ? { useMapSettings: true } : {} };
     })();
     svc.play(test).then(
       (outcome) => this.say(outcome === "started" ? t("The test game is running with {name}: each edit goes into it.", { name: s.source.name }) : t("The play page has {name}; choose a map there.", { name: s.source.name })),
@@ -19829,7 +20225,7 @@ var ModEditor = class {
         if (file) map = { bytes: new Uint8Array(await file.arrayBuffer()), name: file.name };
       }
       try {
-        const outcome = await this.playTab.play(playMessage({ name: s.source.name, hash, files, map }));
+        const outcome = await this.playTab.play(playMessage({ name: s.source.name, hash, files, map, races: this.races?.rows ?? [] }));
         this.say(outcome === "started" ? t("Playing {map} with {name} ({n} files, {hash}).", { map: map?.name ?? "", name: s.source.name, n: num2(files.length), hash }) : t("The play page has {name} ({n} files, {hash}); choose a map there.", { name: s.source.name, n: num2(files.length), hash }));
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
