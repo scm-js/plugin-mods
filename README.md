@@ -18,6 +18,11 @@ game's files (at its root or one folder down, as `mpq/` in a mod's release), an 
 `scmjs mod unpack` wrote. An `.mpq`, `.exe` or `.zip` dropped on the editor itself opens here too. The panel says in
 one line what it found.
 
+A copy of the game in what you open is not the mod. In a folder that holds `StarDat.mpq`, the game's own archives
+(`StarDat.mpq`, `BrooDat.mpq`, `patch_rt.mpq`, `StarCraft.mpq`, `BroodWar.mpq`) and everything under its `Maps` folder
+are left out unread, and the panel says which archives. A `patch_rt.mpq` opened on its own, as some old mods ship, is
+still a mod.
+
 - **Tables** — a grid a table (units, weapons, flingy, sprites, images, upgrades, technologies, orders, sounds,
   portraits, campaign maps), every field under its PyMS name, the entry's name beside its id. Search by name or id.
   A table wider than the game's shows its named entries until *Unnamed too* is ticked. The side shows the chosen
@@ -93,7 +98,8 @@ make it another game on the others.
 ```sh
 npm install
 npm run build        # dist/plugin.js
-npm test             # vitest; SCMJS_COSMONARCHY=<a release folder holding mpq/> adds a large mod's test
+npm test             # vitest; SCMJS_COSMONARCHY=<a release folder holding mpq/> adds a large mod's test,
+                     # SCMJS_COSMONARCHY_ROOT=<a folder holding Release/ beside a copy of the game> another
 npm run typecheck
 ```
 

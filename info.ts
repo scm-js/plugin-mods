@@ -4,7 +4,7 @@
  */
 import { DAT_SCHEMAS, datShape, datTableOf, gameName } from "@scm-js/core";
 import { t } from "./i18n";
-import type { ModSource } from "./source";
+import { gameCopies, type ModSource } from "./source";
 
 /** The kinds of file a mod changes, in the order they are named (the command line and the play page name them alike). */
 export const MOD_KINDS = ["tables", "scripts", "pictures", "sounds", "terrain", "strings", "AI", "maps", "other"] as const;
@@ -96,5 +96,15 @@ export function foundLine(source: ModSource): string {
   }
   const carried = source.plugins.length + source.firegraft.length;
   if (carried) parts.push(t("{n, plural, one {{count} plugin or FireGraft file} other {{count} plugins or FireGraft files}} kept, not run.", { n: carried, count: num(carried) }));
+  const copy = gameCopyNotice(source);
+  if (copy) parts.push(copy);
   return parts.join(" ");
+}
+
+/** What was left out as a copy of the game handed over with the mod, a sentence a copy; "" when there was none. */
+export function gameCopyNotice(source: ModSource): string {
+  return gameCopies(source.gameCopy).map(({ folder, names }) => {
+    const list = names.slice(0, 6).join(", ") + (names.length > 6 ? ` ${t("and {n} more", { n: num(names.length - 6) })}` : "");
+    return t("{folder} is a copy of the game. Its own archives ({list}) are not part of the mod and were left out.", { folder: folder || source.name, list });
+  }).join(" ");
 }

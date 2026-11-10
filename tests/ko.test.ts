@@ -27,4 +27,9 @@ describe("the Korean catalogue", () => {
       expect([...names(ko)].sort(), en).toEqual(want);
     }
   });
+
+  // The editor reads a particle inside the braces, `{file|은}`; written after them, `{file}|은`, the bar is shown.
+  it("writes a particle inside its placeholder", () => {
+    expect(Object.entries(KO).filter(([, ko]) => /\}\|/.test(ko)).map(([en]) => en)).toEqual([]);
+  });
 });

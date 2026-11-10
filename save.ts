@@ -10,6 +10,7 @@ import {
   type DatTableName, type ModManifest, type Rendered,
 } from "@scm-js/core";
 import type { ModSession } from "./session";
+import { gameCopies } from "./source";
 
 export type Compression = "zlib" | "pkware" | "none";
 
@@ -103,6 +104,7 @@ export async function textFolder(session: ModSession, progress?: (done: number, 
       into.push({ name: p.name.split(/[\\/]/).pop()!, bytes: data.length, file, ...(p.member ? { member: p.member } : {}) });
     }
   }
+  for (const { folder, names } of gameCopies(session.source.gameCopy)) manifest.notes.push(`${folder || session.source.name} is a copy of the game: its own archives (${names.join(", ")}) are not part of the mod and were left out`);
   if (session.source.probed.length) manifest.notes.push(`${session.source.probed.join(", ")} had no list of its files: only the names the game reads were found in it`);
   if (!palette) manifest.notes.push(`no palette ${manifest.palette} was found (the mod's tileset\\${manifest.palette}.wpe, or the game's): the GRPs are kept as bytes`);
   tidyManifest(manifest);
