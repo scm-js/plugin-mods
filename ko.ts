@@ -222,6 +222,8 @@ export const KO: Record<string, string> = {
   "{file} is in neither the mod nor the game's files here.": "{file}|은 모드에도 여기 있는 게임 파일에도 없습니다.",
   "{file} is not a mod: not an MPQ, a self-executing exe or a zip.": "{file}|은 모드가 아닙니다: MPQ도, 자동 실행 exe도, zip도 아닙니다.",
   "{file} is not a zip.": "{file}|은 zip이 아닙니다.",
+  "{folder} is a copy of the game. Its own archives ({list}) are not part of the mod and were left out.": "{folder|은} 게임의 사본입니다. 게임 자체의 아카이브({list})는 모드가 아니므로 제외했습니다.",
+  "{folder} is a copy of the game, and there is no mod in it.": "{folder|은} 게임의 사본이고, 그 안에 모드가 없습니다.",
   "{file} is not read as a GRP: {error}": "{file}|을 GRP로 읽지 못했습니다: {error}",
   "{file} is not read as a PNG: {error}": "{file}|을 PNG로 읽지 못했습니다: {error}",
   "{file} is {w} × {h}: fewer cells than the GRP's {n} frames of {fw} × {fh}.": "{file}|은 {w} × {h}입니다: {fw} × {fh} 프레임 {n}개인 GRP보다 칸이 적습니다.",

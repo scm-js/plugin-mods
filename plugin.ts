@@ -16,7 +16,7 @@ import type { FolderFile, GameDataProfile, PanelHandle, PluginApi } from "@scm-j
 import { DAT_SCHEMAS, createScenario, serializeScenario, type DatTableName, type ModChange, type ModFinding } from "@scm-js/core";
 import { button, clear, ensureStyle, h } from "./dom";
 import { bindLanguage, msg, t } from "./i18n";
-import { foundLine, num, sizeText } from "./info";
+import { foundLine, gameCopyNotice, num, sizeText } from "./info";
 import { KO } from "./ko";
 import { DEFAULT_DIST, DIST_STORAGE_KEY } from "./monaco";
 import { PlayTab, playAddress, playMessage, playPageThere } from "./play";
@@ -297,6 +297,9 @@ class ModEditor {
       this.live.follow(session);
       this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1000).toFixed(1), found: this.found });
       this.api.ui.status(this.found);
+      // A copy of the game handed over with the mod was left out: said where it cannot be missed, kept until dismissed.
+      const copy = gameCopyNotice(source);
+      if (copy) this.api.ui.toast({ kind: "warn", title: copy, ttl: 0 });
       this.draw();
       await this.attach();
     } catch (e) {

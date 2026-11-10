@@ -9,7 +9,7 @@
 import { Archive } from "mopaq";
 import { t } from "./i18n";
 import {
-  DAT_SCHEMAS, DAT_TABLES, MOD_MANIFEST, decodeTblFile, entryText, exeArchive, gameName, isMpq, isZip, memberOf, modRoot, namesOf, packFile, readManifest, readZip,
+  DAT_SCHEMAS, DAT_TABLES, GAME_FOLDERS, MOD_MANIFEST, decodeTblFile, entryText, exeArchive, gameName, isMpq, isZip, memberOf, modRoot, namesOf, packFile, readManifest, readZip,
   decodeDat, datTableOf, type DatTableName, type ModData, type ModManifest, type ModNames,
 } from "@scm-js/core";
 
@@ -39,6 +39,56 @@ export function isSystemFile(path: string): boolean {
   return (SYSTEM_FILES.names as readonly string[]).includes(name)
     || SYSTEM_FILES.prefixes.some((p) => name.startsWith(p))
     || parts.some((folder) => (SYSTEM_FILES.folders as readonly string[]).includes(folder));
+}
+
+/*
+ * A copy of the game in what was handed over is not the mod. A mod's makers may ship the game beside it (Cosmonarchy's
+ * `Release/` beside a whole 1.16.1 `Starcraft/`); laid as layers, the game's archives would be taken for the mod's
+ * files, the last found winning — original StarCraft's `iscript.bin` from `StarDat.mpq` over the mod's. A folder that
+ * holds a `StarDat.mpq` is such a copy: its `GAME_ARCHIVES`, and everything under its `Maps` folder (the person's maps
+ * folder, which the game lists from disk and reads no mod's data by), are the game's own and left out unread. Anything
+ * else in it is taken as before.
+ *
+ * `@scm-js/core` gets the same list and function in the release after 0.13.1 (the command line and the play page tell a
+ * copy of the game the same way); a copy here so the plugin is right with the core on npm today.
+ */
+/** The game's own archives, by file name (lower case): what a 1.16.1 installation holds beside its program. */
+export const GAME_ARCHIVES = ["stardat.mpq", "broodat.mpq", "patch_rt.mpq", "starcraft.mpq", "broodwar.mpq"] as const;
+
+/** The files among `paths` (forward slashes) that are a copy of the game's own and so no part of a mod: in every folder
+ *  that holds a `StarDat.mpq`, that folder's `GAME_ARCHIVES` and every file under its `Maps` folder. */
+export function gameCopyFiles(paths: readonly string[]): Set<string> {
+  const dir = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
+  const leaf = (p: string) => p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+  const copies = new Set(paths.filter((p) => leaf(p) === "stardat.mpq").map((p) => dir(p).toLowerCase()));
+  const out = new Set<string>();
+  if (!copies.size) return out;
+  for (const p of paths) {
+    if (copies.has(dir(p).toLowerCase()) && (GAME_ARCHIVES as readonly string[]).includes(leaf(p))) { out.add(p); continue; }
+    for (const c of copies) if (p.toLowerCase().startsWith(c ? `${c}/maps/` : "maps/")) { out.add(p); break; }
+  }
+  return out;
+}
+
+/**
+ * The copies of the game a source's `gameCopy` paths came from: each copy's folder as it was handed over (`""` for the
+ * root of what was handed over) and the names of its files left out — the game's archives first, in `GAME_ARCHIVES`'
+ * order, then those under `Maps` by path.
+ */
+export function gameCopies(gameCopy: readonly string[]): { folder: string; names: string[] }[] {
+  const dir = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
+  const name = (p: string) => p.slice(p.lastIndexOf("/") + 1);
+  const folders = [...new Set(gameCopy.filter((p) => name(p).toLowerCase() === "stardat.mpq").map(dir))].sort((a, b) => b.length - a.length);
+  const rank = (p: string) => { const i = (GAME_ARCHIVES as readonly string[]).indexOf(name(p).toLowerCase()); return i < 0 ? GAME_ARCHIVES.length : i; };
+  const by = new Map<string, string[]>();
+  for (const p of gameCopy) {
+    const folder = folders.find((f) => !f || p.toLowerCase().startsWith(`${f.toLowerCase()}/`)) ?? dir(p);
+    by.set(folder, [...(by.get(folder) ?? []), p]);
+  }
+  return [...by].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([folder, paths]) => ({
+    folder,
+    names: paths.sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0)).map(name),
+  }));
 }
 
 /** A file as it was handed over: its path (forward slashes, folders included) and a way to read it. */
@@ -77,6 +127,8 @@ export interface ModSource {
   duplicates: string[];
   /** Files that are not the game's (a read-me beside the game's folders, an operating system's `desktop.ini`), left out. */
   left: string[];
+  /** Files of a copy of the game handed over with the mod (`gameCopyFiles`), left out unread: the game's, not the mod's. */
+  gameCopy: string[];
   /** Archives with no list of their files, read by the names the game uses. */
   probed: string[];
   /** A text folder's manifest (`mod.json`); null for anything else. */
@@ -86,7 +138,7 @@ export interface ModSource {
 export class OpenError extends Error {}
 
 export function emptySource(kind: SourceKind, name: string): ModSource {
-  return { kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], probed: [], manifest: null };
+  return { kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null };
 }
 
 /** The names the game reads, to look for in an archive that has no list of its files. */
@@ -141,10 +193,16 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
   const archives: { label: string; archive: Archive }[] = [];
   let modName: string | null = null;
   const take = async (list: Piece[], depth: number): Promise<void> => {
+    // A copy of the game among several pieces (a folder's, a zip's members) is left out unread; the one file the person
+    // named (an old mod's lone `patch_rt.mpq`) is opened as it is.
+    const copy = depth === 0 && kind !== "folder" ? new Set<string>() : gameCopyFiles(list.map((p) => p.path));
     for (const p of list) {
       const l = leaf(p.path).toLowerCase();
       // (An operating system's file is nothing of the mod's, whatever its name ends in: macOS's `._gptp.qdp` is no plugin.)
       if (isSystemFile(p.path)) { source.left.push(p.path); continue; }
+      // (An archive of the copy is named in `gameCopy`, which the notice lists; a map or a campaign's music under its
+      // `Maps` folder is left out as any file outside the mod is.)
+      if (copy.has(p.path)) { (/\.(mpq|exe|zip)$/i.test(p.path) ? source.gameCopy : source.left).push(p.path); continue; }
       if (/\.(qdp|bwl)$/.test(l)) { source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
       if (/\.(fgp|fgd)$/.test(l)) { source.firegraft.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
       if (l === "mod.json" && p.path.split("/").length <= 2) {
@@ -205,6 +263,14 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
   // A folder the mod's makers ship holds its launcher: the one exe with an archive in it is named as the mod is.
   if (kind === "folder" && source.exes.length === 1) source.name = leaf(source.exes[0].file).replace(/\.exe$/i, "");
   if (modName) source.name = modName;
+  source.gameCopy.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  // With a copy of the game left out, what else came with it may be only the game's own loose files (a read-me, its
+  // dlls, a zip of shaders): a mod is an archive laid as a layer, a plugin or FireGraft file, or a loose file under one
+  // of the game's folders (`maps` aside, as `modRoot` scores them). Without any of those there is no mod.
+  const underGameFolder = (path: string) => path.toLowerCase().split("/").slice(0, -1).some((f) => f !== "maps" && GAME_FOLDERS.includes(f));
+  if (source.gameCopy.length && !archives.length && !source.plugins.length && !source.firegraft.length && !loose.some((p) => underGameFolder(p.path))) {
+    throw new OpenError(gameCopies(source.gameCopy).map((c) => t("{folder} is a copy of the game, and there is no mod in it.", { folder: c.folder || name })).join(" "));
+  }
   return source;
 }
 
