@@ -14480,6 +14480,317 @@ function closing(s, open) {
   return s.length;
 }
 
+// source.ts
+var SYSTEM_FILES = {
+  names: ["desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store", "icon\r", ".directory"],
+  prefixes: ["._"],
+  folders: ["__macosx"]
+};
+function isSystemFile(path) {
+  const parts = path.toLowerCase().split(/[\\/]/).filter(Boolean);
+  const name = parts.pop() ?? "";
+  return SYSTEM_FILES.names.includes(name) || SYSTEM_FILES.prefixes.some((p) => name.startsWith(p)) || parts.some((folder) => SYSTEM_FILES.folders.includes(folder));
+}
+var GAME_ARCHIVES = ["stardat.mpq", "broodat.mpq", "patch_rt.mpq", "starcraft.mpq", "broodwar.mpq"];
+function gameCopyFiles(paths) {
+  const dir = (p) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
+  const leaf2 = (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+  const copies = new Set(paths.filter((p) => leaf2(p) === "stardat.mpq").map((p) => dir(p).toLowerCase()));
+  const out = /* @__PURE__ */ new Set();
+  if (!copies.size) return out;
+  for (const p of paths) {
+    if (copies.has(dir(p).toLowerCase()) && GAME_ARCHIVES.includes(leaf2(p))) {
+      out.add(p);
+      continue;
+    }
+    for (const c2 of copies) if (p.toLowerCase().startsWith(c2 ? `${c2}/maps/` : "maps/")) {
+      out.add(p);
+      break;
+    }
+  }
+  return out;
+}
+function gameCopies(gameCopy) {
+  const dir = (p) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
+  const name = (p) => p.slice(p.lastIndexOf("/") + 1);
+  const folders = [...new Set(gameCopy.filter((p) => name(p).toLowerCase() === "stardat.mpq").map(dir))].sort((a2, b) => b.length - a2.length);
+  const rank = (p) => {
+    const i2 = GAME_ARCHIVES.indexOf(name(p).toLowerCase());
+    return i2 < 0 ? GAME_ARCHIVES.length : i2;
+  };
+  const by = /* @__PURE__ */ new Map();
+  for (const p of gameCopy) {
+    const folder = folders.find((f) => !f || p.toLowerCase().startsWith(`${f.toLowerCase()}/`)) ?? dir(p);
+    by.set(folder, [...by.get(folder) ?? [], p]);
+  }
+  return [...by].sort(([a2], [b]) => a2 < b ? -1 : a2 > b ? 1 : 0).map(([folder, paths]) => ({
+    folder,
+    names: paths.sort((a2, b) => rank(a2) - rank(b) || (a2 < b ? -1 : a2 > b ? 1 : 0)).map(name)
+  }));
+}
+var OpenError = class extends Error {
+};
+function emptySource(kind, name) {
+  return { kind, name, layers: [], files: /* @__PURE__ */ new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null };
+}
+function probeNames(archive) {
+  const names = /* @__PURE__ */ new Set();
+  for (const t2 of DAT_TABLES) {
+    names.add(DAT_SCHEMAS[t2].file);
+    names.add(`${DAT_SCHEMAS[t2].file}ex`);
+  }
+  for (const n of ["rez\\stat_txt.tbl", "rez\\unitnames.tbl", "arr\\images.tbl", "arr\\sfxdata.tbl", "arr\\portdata.tbl", "arr\\mapdata.tbl", "scripts\\iscript.bin", "scripts\\aiscript.bin", "scripts\\bwscript.bin", "unit\\cmdbtns\\cmdicons.grp", "unit\\cmdbtns\\ticon.pcx", "unit\\cmdbtns\\uniticons.grp", "game\\tunit.pcx", "game\\tselect.pcx", "game\\tminimap.pcx", "game\\tblink.pcx"]) names.add(n);
+  for (const t2 of ["badlands", "platform", "install", "ashworld", "jungle", "desert", "ice", "twilight"]) for (const ext of ["cv5", "vf4", "vr4", "vx4", "vx4ex", "wpe", "grp", "dddata.dat"]) names.add(ext.includes(".") ? `tileset\\${t2}\\${ext}` : `tileset\\${t2}.${ext}`);
+  for (const [tbl, under] of [["arr\\images.tbl", "unit\\"], ["arr\\sfxdata.tbl", "sound\\"]]) {
+    try {
+      for (const s of decodeTblFile(archive.readFile(tbl)).strings) {
+        const p = entryText(s);
+        if (p) names.add(under + p);
+      }
+    } catch {
+    }
+  }
+  return [...names].filter((n) => {
+    try {
+      return !!archive.fileInfo(n);
+    } catch {
+      return false;
+    }
+  });
+}
+var leaf = (p) => p.split("/").pop();
+async function openPieces(pieces, name, base = null) {
+  if (!pieces.length) throw new OpenError(t("Nothing was handed over."));
+  const textFolder2 = await findTextFolder(pieces);
+  if (textFolder2) return openTextFolder(textFolder2.root, textFolder2.manifest, pieces, name, base);
+  const single = pieces.length === 1 && !pieces[0].path.includes("/");
+  if (single && /\.zip$/i.test(pieces[0].path)) {
+    const bytes = await pieces[0].read();
+    if (!isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
+    let members;
+    try {
+      members = readZip(bytes);
+    } catch (e) {
+      throw new OpenError(t("{file}: {error}", { file: pieces[0].path, error: e.message }));
+    }
+    const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
+    const folder = await findTextFolder(inside);
+    if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
+  }
+  const lower = pieces[0].path.toLowerCase();
+  const kind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") ? "exe" : "archive";
+  if (single) {
+    const bytes = await pieces[0].read();
+    if (kind === "zip" && !isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
+    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(t("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: pieces[0].path }));
+    const piece = { path: pieces[0].path, size: bytes.length, read: async () => bytes };
+    return fromPieces(kind, name.replace(/\.(mpq|exe|zip)$/i, ""), [piece]);
+  }
+  return fromPieces(kind, name, pieces);
+}
+async function fromPieces(kind, name, pieces) {
+  const source = emptySource(kind, name);
+  const loose = [];
+  const archives = [];
+  let modName = null;
+  const take = async (list, depth) => {
+    const copy = depth === 0 && kind !== "folder" ? /* @__PURE__ */ new Set() : gameCopyFiles(list.map((p) => p.path));
+    for (const p of list) {
+      const l = leaf(p.path).toLowerCase();
+      if (isSystemFile(p.path)) {
+        source.left.push(p.path);
+        continue;
+      }
+      if (copy.has(p.path)) {
+        (/\.(mpq|exe|zip)$/i.test(p.path) ? source.gameCopy : source.left).push(p.path);
+        continue;
+      }
+      if (/\.(qdp|bwl)$/.test(l)) {
+        source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path });
+        continue;
+      }
+      if (/\.(fgp|fgd)$/.test(l)) {
+        source.firegraft.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path });
+        continue;
+      }
+      if (l === "mod.json" && p.path.split("/").length <= 2) {
+        try {
+          const n = JSON.parse(new TextDecoder().decode(await p.read())).name;
+          if (typeof n === "string" && n.trim()) modName = n.trim();
+        } catch {
+        }
+        continue;
+      }
+      if (!/\.(zip|mpq|exe)$/.test(l)) {
+        loose.push(p);
+        continue;
+      }
+      const bytes = await p.read();
+      if (l.endsWith(".zip") && isZip(bytes)) {
+        if (depth > 2) continue;
+        let members;
+        try {
+          members = readZip(bytes);
+        } catch (e) {
+          throw new OpenError(t("{file}: {error}", { file: p.path, error: e.message }));
+        }
+        const prefix = list.length === 1 && depth === 0 ? "" : p.path.replace(/\.zip$/i, "") + "/";
+        await take(members.map((m) => ({ path: `${prefix}${m.path}`, size: m.size, read: m.read })), depth + 1);
+      } else if (l.endsWith(".mpq") && isMpq(bytes)) {
+        try {
+          archives.push({ label: p.path, archive: Archive.open(bytes) });
+        } catch (e) {
+          throw new OpenError(t("{file} could not be opened as an archive: {error}", { file: p.path, error: e.message }));
+        }
+      } else if (l.endsWith(".exe")) {
+        const found = exeArchive(bytes);
+        if (!found) {
+          source.left.push(p.path);
+          continue;
+        }
+        try {
+          archives.push({ label: p.path, archive: Archive.open(found.archive) });
+        } catch (e) {
+          throw new OpenError(t("The archive inside {file} could not be opened: {error}", { file: p.path, error: e.message }));
+        }
+        source.exes.push({ file: p.path, kind: found.kind, at: found.at, plugins: found.plugins });
+      } else loose.push(p);
+    }
+  };
+  await take(pieces, 0);
+  for (const { label, archive } of archives) {
+    source.layers.push(label);
+    const listed = (archive.files() ?? []).filter((n) => !n.startsWith("("));
+    if (!listed.length) source.probed.push(label);
+    const seen = new Set(listed.map(gameName));
+    for (const n of [...listed, ...probeNames(archive).filter((n2) => !seen.has(gameName(n2)))]) {
+      const info = archive.fileInfo(n);
+      if (!info) continue;
+      const read = async () => archive.readFile(n);
+      const key = gameName(n);
+      if (isSystemFile(key)) continue;
+      if (/\.(qdp|bwl)$/.test(key)) {
+        source.plugins.push({ name: n.split("\\").pop(), bytes: info.uncompressedSize, read, member: n, layer: label });
+        continue;
+      }
+      if (/\.(fgp|fgd)$/.test(key)) {
+        source.firegraft.push({ name: n.split("\\").pop(), bytes: info.uncompressedSize, read, member: n, layer: label });
+        continue;
+      }
+      source.files.set(key, { name: n, size: info.uncompressedSize, read, layer: label });
+    }
+  }
+  const root = modRoot(loose.map((p) => p.path));
+  const layer = root ? `${root}/` : "./";
+  if (loose.some((p) => !root || p.path.startsWith(root + "/"))) source.layers.push(layer);
+  for (const p of loose) {
+    if (root && !p.path.startsWith(root + "/")) {
+      source.left.push(p.path);
+      continue;
+    }
+    const rel = root ? p.path.slice(root.length + 1) : p.path;
+    if (!rel.includes("/")) {
+      source.left.push(p.path);
+      continue;
+    }
+    const key = gameName(rel);
+    const was = source.files.get(key);
+    if (was && was.layer === layer) source.duplicates.push(`${was.name} and ${rel.replace(/\//g, "\\")}`);
+    source.files.set(key, { name: rel.replace(/\//g, "\\"), size: p.size, read: p.read, layer });
+  }
+  if (kind === "folder" && source.exes.length === 1) source.name = leaf(source.exes[0].file).replace(/\.exe$/i, "");
+  if (modName) source.name = modName;
+  source.gameCopy.sort((a2, b) => a2 < b ? -1 : a2 > b ? 1 : 0);
+  const underGameFolder = (path) => path.toLowerCase().split("/").slice(0, -1).some((f) => f !== "maps" && GAME_FOLDERS.includes(f));
+  if (source.gameCopy.length && !archives.length && !source.plugins.length && !source.firegraft.length && !loose.some((p) => underGameFolder(p.path))) {
+    throw new OpenError(gameCopies(source.gameCopy).map((c2) => t("{folder} is a copy of the game, and there is no mod in it.", { folder: c2.folder || name })).join(" "));
+  }
+  return source;
+}
+async function findTextFolder(pieces) {
+  for (const p of pieces) {
+    const parts = p.path.split("/");
+    if (parts[parts.length - 1] !== "mod.json" || parts.length > 2) continue;
+    let manifest = null;
+    try {
+      manifest = readManifest(new TextDecoder().decode(await p.read()));
+    } catch (e) {
+      throw new OpenError(e.message);
+    }
+    if (manifest) return { root: parts.slice(0, -1).join("/"), manifest };
+  }
+  return null;
+}
+async function openTextFolder(root, manifest, pieces, name, base) {
+  const source = emptySource("mod folder", manifest.name || name);
+  source.manifest = manifest;
+  source.layers.push(root ? `${root}/` : "./");
+  const inside = pieces.filter((p) => !root || p.path.startsWith(root + "/")).map((p) => ({ ...p, path: root ? p.path.slice(root.length + 1) : p.path }));
+  let names;
+  const ctx = () => ({ manifest, names });
+  const packed2 = /* @__PURE__ */ new Map();
+  const pack = (p) => {
+    let got = packed2.get(p.path);
+    if (!got) {
+      got = p.read().then((data) => packFile(p.path, data, ctx()));
+      packed2.set(p.path, got);
+    }
+    return got;
+  };
+  for (const p of inside) {
+    if (p.path === MOD_MANIFEST) continue;
+    if (isSystemFile(p.path)) {
+      source.left.push(p.path);
+      continue;
+    }
+    const of = memberOf(p.path, manifest);
+    if (!of) {
+      source.left.push(p.path);
+      continue;
+    }
+    if (of.form === "plugin" || of.form === "firegraft") {
+      const member = of.members[0];
+      const read = async () => (await pack(p))[0].data;
+      (of.form === "plugin" ? source.plugins : source.firegraft).push({ name: leaf(p.path), bytes: p.size, read, member, layer: source.layers[0] });
+      continue;
+    }
+    for (const member of of.form === "ai" ? of.members : [of.members[0]]) {
+      const read = async () => {
+        const got = (await pack(p)).find((m) => gameName(m.member) === gameName(member));
+        if (!got) throw new OpenError(t("{file} gave no {member}.", { file: p.path, member }));
+        return got.data;
+      };
+      source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path });
+    }
+  }
+  if (manifest.names !== "none" && [...source.files.keys()].some((k) => /^scripts\\(aiscript|bwscript)\.bin$/.test(k))) {
+    const read = async (member) => {
+      const f = source.files.get(gameName(member));
+      if (f) return f.read();
+      return manifest.names === "game" && base ? base(member) : null;
+    };
+    const tables2 = {};
+    for (const t2 of DAT_TABLES) {
+      for (const member of [`${DAT_SCHEMAS[t2].file}ex`, DAT_SCHEMAS[t2].file]) {
+        const bytes = await read(member);
+        if (bytes) {
+          tables2[t2] = decodeDat(datTableOf(member), bytes, { fileName: member });
+          break;
+        }
+      }
+    }
+    const tbl = async (member) => {
+      const b = await read(member);
+      return b ? decodeTblFile(b).strings : null;
+    };
+    names = namesOf(tables2, { stat: await tbl("rez\\stat_txt.tbl"), unitnames: await tbl("rez\\unitnames.tbl"), images: await tbl("arr\\images.tbl"), sfxdata: await tbl("arr\\sfxdata.tbl"), portdata: null, mapdata: null });
+  }
+  return source;
+}
+function looksLikeMod(paths) {
+  return paths.some((p) => /^[^/]+\/([^/]+\/)?(arr\/[^/]+\.dat(ex)?|scripts\/[^/]+\.bin|rez\/[^/]+\.tbl|unit\/.+\.grp)$/i.test(p) || /^[^/]+\/mod\.json$/i.test(p));
+}
+
 // info.ts
 var MOD_KINDS = ["tables", "scripts", "pictures", "sounds", "terrain", "strings", "AI", "maps", "other"];
 function kindOf(name) {
@@ -14565,7 +14876,15 @@ function foundLine(source) {
   }
   const carried = source.plugins.length + source.firegraft.length;
   if (carried) parts.push(t("{n, plural, one {{count} plugin or FireGraft file} other {{count} plugins or FireGraft files}} kept, not run.", { n: carried, count: num2(carried) }));
+  const copy = gameCopyNotice(source);
+  if (copy) parts.push(copy);
   return parts.join(" ");
+}
+function gameCopyNotice(source) {
+  return gameCopies(source.gameCopy).map(({ folder, names }) => {
+    const list = names.slice(0, 6).join(", ") + (names.length > 6 ? ` ${t("and {n} more", { n: num2(names.length - 6) })}` : "");
+    return t("{folder} is a copy of the game. Its own archives ({list}) are not part of the mod and were left out.", { folder: folder || source.name, list });
+  }).join(" ");
 }
 
 // ko.ts
@@ -14620,8 +14939,8 @@ var KO = {
   "Facing": "\uBC29\uD5A5",
   "File": "\uD30C\uC77C",
   "Flingy": "Flingy",
-  "Frame {frame} is past the GRP's {n} frames.": "\uD504\uB808\uC784 {frame}|\uC740 GRP\uC758 \uD504\uB808\uC784 {n}\uAC1C\uB97C \uB118\uC2B5\uB2C8\uB2E4.",
-  "Frame {i} of {file} replaced from {png}.": "{file}\uC758 \uD504\uB808\uC784 {i}|\uC744 {png}|\uC73C\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
+  "Frame {frame} is past the GRP's {n} frames.": "\uD504\uB808\uC784 {frame|\uC740} GRP\uC758 \uD504\uB808\uC784 {n}\uAC1C\uB97C \uB118\uC2B5\uB2C8\uB2E4.",
+  "Frame {i} of {file} replaced from {png}.": "{file}\uC758 \uD504\uB808\uC784 {i|\uC744} {png|\uC73C\uB85C} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
   "Frame {i} of {n}: {w} \xD7 {h} at {x}, {y}": "\uD504\uB808\uC784 {i} / {n}: {w} \xD7 {h}, \uC704\uCE58 {x}, {y}",
   "Frames": "\uD504\uB808\uC784",
   "Game frame {tick} \xB7 GRP frame {frame}{flip} \xB7 facing {dir}": "\uAC8C\uC784 \uD504\uB808\uC784 {tick} \xB7 GRP \uD504\uB808\uC784 {frame}{flip} \xB7 \uBC29\uD5A5 {dir}",
@@ -14636,7 +14955,7 @@ var KO = {
   "Import {png}": "{png} \uAC00\uC838\uC624\uAE30",
   "In the mod": "\uBAA8\uB4DC\uC5D0 \uC788\uC74C",
   "It replaces all {n} frames of {file}.": "{file}\uC758 \uD504\uB808\uC784 {n}\uAC1C\uB97C \uBAA8\uB450 \uBC14\uAFC9\uB2C8\uB2E4.",
-  "It replaces frame {i} of {file}.": "{file}\uC758 \uD504\uB808\uC784 {i}|\uC744 \uBC14\uAFC9\uB2C8\uB2E4.",
+  "It replaces frame {i} of {file}.": "{file}\uC758 \uD504\uB808\uC784 {i|\uC744} \uBC14\uAFC9\uB2C8\uB2E4.",
   "Its picture and animation \u2192": "\uADF8\uB9BC\uACFC \uC560\uB2C8\uBA54\uC774\uC158 \u2192",
   "Line {line}: {message}. The script keeps its last text that assembled.": "{line}\uBC88 \uC904: {message}. \uC2A4\uD06C\uB9BD\uD2B8\uB294 \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC5B4\uC148\uBE14\uB41C \uD14D\uC2A4\uD2B8\uB97C \uC720\uC9C0\uD569\uB2C8\uB2E4.",
   "Loading the code editor\u2026": "\uCF54\uB4DC \uD3B8\uC9D1\uAE30\uB97C \uBD88\uB7EC\uC624\uB294 \uC911\u2026",
@@ -14648,7 +14967,7 @@ var KO = {
   "No file differs from the mod as it was opened: nothing to save.": "\uC5F4\uC5C8\uC744 \uB54C\uC758 \uBAA8\uB4DC\uC640 \uB2E4\uB978 \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4: \uC800\uC7A5\uD560 \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "No image chosen.": "\uACE0\uB978 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "No image draws this GRP, so it has no script to play.": "\uC774 GRP\uB97C \uADF8\uB9AC\uB294 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC5B4 \uC7AC\uC0DD\uD560 \uC2A4\uD06C\uB9BD\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
-  "No iscript defines {id}.": "{id}|\uC744 \uC815\uC758\uD558\uB294 iscript\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "No iscript defines {id}.": "{id|\uC744} \uC815\uC758\uD558\uB294 iscript\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "No script defines iscript {id}.": "iscript {id|\uC744} \uC815\uC758\uD558\uB294 \uC2A4\uD06C\uB9BD\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "No team colour": "\uD300 \uC0C9 \uC5C6\uC74C",
   "Not imported.": "\uAC00\uC838\uC624\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
@@ -14735,11 +15054,11 @@ var KO = {
   "The mod has no overlay files.": "\uC774 \uBAA8\uB4DC\uC5D0\uB294 \uC624\uBC84\uB808\uC774 \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "The mod has no {table} table.": "\uC774 \uBAA8\uB4DC\uC5D0\uB294 {table} \uD45C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "The mod's hash is {hash}.": "\uBAA8\uB4DC\uC758 \uD574\uC2DC\uB294 {hash}\uC785\uB2C8\uB2E4.",
-  "The palette {name} is in neither the mod nor the game's files here.": "\uD314\uB808\uD2B8 {name}|\uC740 \uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "The palette {name} is in neither the mod nor the game's files here.": "\uD314\uB808\uD2B8 {name|\uC740} \uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "The play page did not answer. Is it open in another tab?": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uAC00 \uC751\uB2F5\uD558\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uB2E4\uB978 \uD0ED\uC5D0 \uC5F4\uB824 \uC788\uB098\uC694?",
   "The play page has {name} ({n} files, {hash}); choose a map there.": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uAC00 {name|\uC744} \uBC1B\uC558\uC2B5\uB2C8\uB2E4 (\uD30C\uC77C {n}\uAC1C, {hash}). \uAC70\uAE30\uC11C \uB9F5\uC744 \uACE0\uB974\uC138\uC694.",
   "The play page said: {message}": "\uD50C\uB808\uC774 \uD398\uC774\uC9C0\uC758 \uC751\uB2F5: {message}",
-  "The sheet says it was drawn in the palette {was}; it is read in {now}.": "\uC2DC\uD2B8\uB294 \uD314\uB808\uD2B8 {was}\uB85C \uADF8\uB824\uC84C\uB2E4\uACE0 \uD569\uB2C8\uB2E4. {now}|\uC73C\uB85C \uC77D\uC2B5\uB2C8\uB2E4.",
+  "The sheet says it was drawn in the palette {was}; it is read in {now}.": "\uC2DC\uD2B8\uB294 \uD314\uB808\uD2B8 {was}\uB85C \uADF8\uB824\uC84C\uB2E4\uACE0 \uD569\uB2C8\uB2E4. {now|\uC73C\uB85C} \uC77D\uC2B5\uB2C8\uB2E4.",
   "The string table": "\uBB38\uC790\uC5F4 \uD45C",
   "The table": "\uD45C",
   "There is no play page at {address}: it is served beside the editor on scmjs.dev, not by a development server of the editor alone.": "{address}\uC5D0 \uD50C\uB808\uC774 \uD398\uC774\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4: \uD50C\uB808\uC774 \uD398\uC774\uC9C0\uB294 scmjs.dev\uC5D0\uC11C \uD3B8\uC9D1\uAE30 \uC606\uC5D0 \uC81C\uACF5\uB418\uBA70, \uD3B8\uC9D1\uAE30\uB9CC\uC758 \uAC1C\uBC1C \uC11C\uBC84\uC5D0\uB294 \uC5C6\uC2B5\uB2C8\uB2E4.",
@@ -14784,20 +15103,22 @@ var KO = {
   "{field} holds a whole number from 0 to {max} ({type}).": "{field}\uC5D0\uB294 0\uBD80\uD130 {max}\uAE4C\uC9C0\uC758 \uC815\uC218\uAC00 \uB4E4\uC5B4\uAC11\uB2C8\uB2E4 ({type}).",
   "{field} is in parts: {parts}.": "{field}\uB294 \uC5EC\uB7EC \uBD80\uBD84\uC73C\uB85C \uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4: {parts}.",
   "{file} cannot be shown as text: {why}": "{file|\uC744} \uD14D\uC2A4\uD2B8\uB85C \uBCF4\uC77C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: {why}",
-  "{file} could not be opened as an archive: {error}": "{file}|\uC744 \uC544\uCE74\uC774\uBE0C\uB85C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
-  "{file} does not play here: {error}": "{file}|\uC740 \uC5EC\uAE30\uC11C \uC7AC\uC0DD\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: {error}",
+  "{file} could not be opened as an archive: {error}": "{file|\uC744} \uC544\uCE74\uC774\uBE0C\uB85C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
+  "{file} does not play here: {error}": "{file|\uC740} \uC5EC\uAE30\uC11C \uC7AC\uC0DD\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: {error}",
   "{file} entry {n} changed.": "{file} \uD56D\uBAA9 {n|\uC744} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
-  "{file} gave no {member}.": "{file}\uC5D0\uC11C {member}|\uC774 \uB098\uC624\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
-  "{file} is in neither the mod nor the game's files here.": "{file}|\uC740 \uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4.",
-  "{file} is not a mod: not an MPQ, a self-executing exe or a zip.": "{file}|\uC740 \uBAA8\uB4DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: MPQ\uB3C4, \uC790\uB3D9 \uC2E4\uD589 exe\uB3C4, zip\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
-  "{file} is not a zip.": "{file}|\uC740 zip\uC774 \uC544\uB2D9\uB2C8\uB2E4.",
-  "{file} is not read as a GRP: {error}": "{file}|\uC744 GRP\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
-  "{file} is not read as a PNG: {error}": "{file}|\uC744 PNG\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
-  "{file} is {w} \xD7 {h}: fewer cells than the GRP's {n} frames of {fw} \xD7 {fh}.": "{file}|\uC740 {w} \xD7 {h}\uC785\uB2C8\uB2E4: {fw} \xD7 {fh} \uD504\uB808\uC784 {n}\uAC1C\uC778 GRP\uBCF4\uB2E4 \uCE78\uC774 \uC801\uC2B5\uB2C8\uB2E4.",
-  "{file} is {w} \xD7 {h}: neither one frame ({fw} \xD7 {fh}) nor a sheet of them.": "{file}|\uC740 {w} \xD7 {h}\uC785\uB2C8\uB2E4: \uD504\uB808\uC784 \uD558\uB098({fw} \xD7 {fh})\uB3C4, \uD504\uB808\uC784 \uC2DC\uD2B8\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
-  "{file} replaced by {name} ({s} s{converted}){shared}.": "{file}|\uC744 {name}|\uC73C\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4 ({s}\uCD08{converted}){shared}.",
+  "{file} gave no {member}.": "{file}\uC5D0\uC11C {member|\uC774} \uB098\uC624\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
+  "{file} is in neither the mod nor the game's files here.": "{file|\uC740} \uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "{file} is not a mod: not an MPQ, a self-executing exe or a zip.": "{file|\uC740} \uBAA8\uB4DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: MPQ\uB3C4, \uC790\uB3D9 \uC2E4\uD589 exe\uB3C4, zip\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
+  "{file} is not a zip.": "{file|\uC740} zip\uC774 \uC544\uB2D9\uB2C8\uB2E4.",
+  "{folder} is a copy of the game. Its own archives ({list}) are not part of the mod and were left out.": "{folder|\uC740} \uAC8C\uC784\uC758 \uC0AC\uBCF8\uC785\uB2C8\uB2E4. \uAC8C\uC784 \uC790\uCCB4\uC758 \uC544\uCE74\uC774\uBE0C({list})\uB294 \uBAA8\uB4DC\uAC00 \uC544\uB2C8\uBBC0\uB85C \uC81C\uC678\uD588\uC2B5\uB2C8\uB2E4.",
+  "{folder} is a copy of the game, and there is no mod in it.": "{folder|\uC740} \uAC8C\uC784\uC758 \uC0AC\uBCF8\uC774\uACE0, \uADF8 \uC548\uC5D0 \uBAA8\uB4DC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "{file} is not read as a GRP: {error}": "{file|\uC744} GRP\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
+  "{file} is not read as a PNG: {error}": "{file|\uC744} PNG\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
+  "{file} is {w} \xD7 {h}: fewer cells than the GRP's {n} frames of {fw} \xD7 {fh}.": "{file|\uC740} {w} \xD7 {h}\uC785\uB2C8\uB2E4: {fw} \xD7 {fh} \uD504\uB808\uC784 {n}\uAC1C\uC778 GRP\uBCF4\uB2E4 \uCE78\uC774 \uC801\uC2B5\uB2C8\uB2E4.",
+  "{file} is {w} \xD7 {h}: neither one frame ({fw} \xD7 {fh}) nor a sheet of them.": "{file|\uC740} {w} \xD7 {h}\uC785\uB2C8\uB2E4: \uD504\uB808\uC784 \uD558\uB098({fw} \xD7 {fh})\uB3C4, \uD504\uB808\uC784 \uC2DC\uD2B8\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
+  "{file} replaced by {name} ({s} s{converted}){shared}.": "{file|\uC744} {name|\uC73C\uB85C} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4 ({s}\uCD08{converted}){shared}.",
   "{file}, line {line}": "{file}, {line}\uBC88 \uC904",
-  "{file}: every frame replaced from {png}.": "{file}: \uBAA8\uB4E0 \uD504\uB808\uC784\uC744 {png}|\uC73C\uB85C \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
+  "{file}: every frame replaced from {png}.": "{file}: \uBAA8\uB4E0 \uD504\uB808\uC784\uC744 {png|\uC73C\uB85C} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
   "{file}: {error}": "{file}: {error}",
   "{file}: {lines} lines, {bytes} bytes as assembled.": "{file}: {lines}\uC904, \uC5B4\uC148\uBE14\uD558\uBA74 {bytes}\uBC14\uC774\uD2B8.",
   "{label}{hash}: the unit palette, the settings dialogs' defaults and the units drawn follow the mod's files as you edit them.": "{label}{hash}: \uC720\uB2DB \uD314\uB808\uD2B8, \uC124\uC815 \uB300\uD654 \uC0C1\uC790\uC758 \uAE30\uBCF8\uAC12, \uADF8\uB824\uC9C0\uB294 \uC720\uB2DB\uC774 \uD3B8\uC9D1\uD558\uB294 \uB300\uB85C \uBAA8\uB4DC\uC758 \uD30C\uC77C\uC744 \uB530\uB985\uB2C8\uB2E4.",
@@ -14820,7 +15141,7 @@ var KO = {
   "{n, plural, one {{count} terrain file} other {{count} terrain files}}": "\uC9C0\uD615 \uD30C\uC77C {count}\uAC1C",
   "{named} named {what} of {total}": "{total}\uAC1C \uC911 \uC774\uB984 \uC788\uB294 {what} {named}\uAC1C",
   "{name} changes nothing of the game here: every file is the game's own.": "{name|\uC740} \uC5EC\uAE30\uC11C \uAC8C\uC784\uC758 \uC5B4\uB5A4 \uAC83\uB3C4 \uBC14\uAFB8\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: \uBAA8\uB4E0 \uD30C\uC77C\uC774 \uAC8C\uC784\uC758 \uAC83\uACFC \uAC19\uC2B5\uB2C8\uB2E4.",
-  "{name} is not a sound this page can read: {error}": "{name}|\uC740 \uC774 \uD398\uC774\uC9C0\uAC00 \uC77D\uC744 \uC218 \uC788\uB294 \uC18C\uB9AC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: {error}",
+  "{name} is not a sound this page can read: {error}": "{name|\uC740} \uC774 \uD398\uC774\uC9C0\uAC00 \uC77D\uC744 \uC218 \uC788\uB294 \uC18C\uB9AC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: {error}",
   "{name}, from {from}: {files} files ({size}) \u2014 {kinds}.": "{name}, {from}\uC5D0\uC11C: \uD30C\uC77C {files}\uAC1C ({size}) \u2014 {kinds}.",
   "{n} KB": "{n} KB",
   "{n} MB": "{n} MB",
@@ -15161,6 +15482,7 @@ async function textFolder(session, progress) {
       into.push({ name: p.name.split(/[\\/]/).pop(), bytes: data.length, file, ...p.member ? { member: p.member } : {} });
     }
   }
+  for (const { folder, names: names2 } of gameCopies(session.source.gameCopy)) manifest.notes.push(`${folder || session.source.name} is a copy of the game: its own archives (${names2.join(", ")}) are not part of the mod and were left out`);
   if (session.source.probed.length) manifest.notes.push(`${session.source.probed.join(", ")} had no list of its files: only the names the game reads were found in it`);
   if (!palette) manifest.notes.push(`no palette ${manifest.palette} was found (the mod's tileset\\${manifest.palette}.wpe, or the game's): the GRPs are kept as bytes`);
   tidyManifest(manifest);
@@ -17451,270 +17773,6 @@ async function sha2562(bytes) {
   return [...new Uint8Array(d)].map((x3) => x3.toString(16).padStart(2, "0")).join("");
 }
 
-// source.ts
-var SYSTEM_FILES = {
-  names: ["desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store", "icon\r", ".directory"],
-  prefixes: ["._"],
-  folders: ["__macosx"]
-};
-function isSystemFile(path) {
-  const parts = path.toLowerCase().split(/[\\/]/).filter(Boolean);
-  const name = parts.pop() ?? "";
-  return SYSTEM_FILES.names.includes(name) || SYSTEM_FILES.prefixes.some((p) => name.startsWith(p)) || parts.some((folder) => SYSTEM_FILES.folders.includes(folder));
-}
-var OpenError = class extends Error {
-};
-function emptySource(kind, name) {
-  return { kind, name, layers: [], files: /* @__PURE__ */ new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], probed: [], manifest: null };
-}
-function probeNames(archive) {
-  const names = /* @__PURE__ */ new Set();
-  for (const t2 of DAT_TABLES) {
-    names.add(DAT_SCHEMAS[t2].file);
-    names.add(`${DAT_SCHEMAS[t2].file}ex`);
-  }
-  for (const n of ["rez\\stat_txt.tbl", "rez\\unitnames.tbl", "arr\\images.tbl", "arr\\sfxdata.tbl", "arr\\portdata.tbl", "arr\\mapdata.tbl", "scripts\\iscript.bin", "scripts\\aiscript.bin", "scripts\\bwscript.bin", "unit\\cmdbtns\\cmdicons.grp", "unit\\cmdbtns\\ticon.pcx", "unit\\cmdbtns\\uniticons.grp", "game\\tunit.pcx", "game\\tselect.pcx", "game\\tminimap.pcx", "game\\tblink.pcx"]) names.add(n);
-  for (const t2 of ["badlands", "platform", "install", "ashworld", "jungle", "desert", "ice", "twilight"]) for (const ext of ["cv5", "vf4", "vr4", "vx4", "vx4ex", "wpe", "grp", "dddata.dat"]) names.add(ext.includes(".") ? `tileset\\${t2}\\${ext}` : `tileset\\${t2}.${ext}`);
-  for (const [tbl, under] of [["arr\\images.tbl", "unit\\"], ["arr\\sfxdata.tbl", "sound\\"]]) {
-    try {
-      for (const s of decodeTblFile(archive.readFile(tbl)).strings) {
-        const p = entryText(s);
-        if (p) names.add(under + p);
-      }
-    } catch {
-    }
-  }
-  return [...names].filter((n) => {
-    try {
-      return !!archive.fileInfo(n);
-    } catch {
-      return false;
-    }
-  });
-}
-var leaf = (p) => p.split("/").pop();
-async function openPieces(pieces, name, base = null) {
-  if (!pieces.length) throw new OpenError(t("Nothing was handed over."));
-  const textFolder2 = await findTextFolder(pieces);
-  if (textFolder2) return openTextFolder(textFolder2.root, textFolder2.manifest, pieces, name, base);
-  const single = pieces.length === 1 && !pieces[0].path.includes("/");
-  if (single && /\.zip$/i.test(pieces[0].path)) {
-    const bytes = await pieces[0].read();
-    if (!isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
-    let members;
-    try {
-      members = readZip(bytes);
-    } catch (e) {
-      throw new OpenError(t("{file}: {error}", { file: pieces[0].path, error: e.message }));
-    }
-    const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
-    const folder = await findTextFolder(inside);
-    if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
-  }
-  const lower = pieces[0].path.toLowerCase();
-  const kind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") ? "exe" : "archive";
-  if (single) {
-    const bytes = await pieces[0].read();
-    if (kind === "zip" && !isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
-    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(t("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: pieces[0].path }));
-    const piece = { path: pieces[0].path, size: bytes.length, read: async () => bytes };
-    return fromPieces(kind, name.replace(/\.(mpq|exe|zip)$/i, ""), [piece]);
-  }
-  return fromPieces(kind, name, pieces);
-}
-async function fromPieces(kind, name, pieces) {
-  const source = emptySource(kind, name);
-  const loose = [];
-  const archives = [];
-  let modName = null;
-  const take = async (list, depth) => {
-    for (const p of list) {
-      const l = leaf(p.path).toLowerCase();
-      if (isSystemFile(p.path)) {
-        source.left.push(p.path);
-        continue;
-      }
-      if (/\.(qdp|bwl)$/.test(l)) {
-        source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path });
-        continue;
-      }
-      if (/\.(fgp|fgd)$/.test(l)) {
-        source.firegraft.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path });
-        continue;
-      }
-      if (l === "mod.json" && p.path.split("/").length <= 2) {
-        try {
-          const n = JSON.parse(new TextDecoder().decode(await p.read())).name;
-          if (typeof n === "string" && n.trim()) modName = n.trim();
-        } catch {
-        }
-        continue;
-      }
-      if (!/\.(zip|mpq|exe)$/.test(l)) {
-        loose.push(p);
-        continue;
-      }
-      const bytes = await p.read();
-      if (l.endsWith(".zip") && isZip(bytes)) {
-        if (depth > 2) continue;
-        let members;
-        try {
-          members = readZip(bytes);
-        } catch (e) {
-          throw new OpenError(t("{file}: {error}", { file: p.path, error: e.message }));
-        }
-        const prefix = list.length === 1 && depth === 0 ? "" : p.path.replace(/\.zip$/i, "") + "/";
-        await take(members.map((m) => ({ path: `${prefix}${m.path}`, size: m.size, read: m.read })), depth + 1);
-      } else if (l.endsWith(".mpq") && isMpq(bytes)) {
-        try {
-          archives.push({ label: p.path, archive: Archive.open(bytes) });
-        } catch (e) {
-          throw new OpenError(t("{file} could not be opened as an archive: {error}", { file: p.path, error: e.message }));
-        }
-      } else if (l.endsWith(".exe")) {
-        const found = exeArchive(bytes);
-        if (!found) {
-          source.left.push(p.path);
-          continue;
-        }
-        try {
-          archives.push({ label: p.path, archive: Archive.open(found.archive) });
-        } catch (e) {
-          throw new OpenError(t("The archive inside {file} could not be opened: {error}", { file: p.path, error: e.message }));
-        }
-        source.exes.push({ file: p.path, kind: found.kind, at: found.at, plugins: found.plugins });
-      } else loose.push(p);
-    }
-  };
-  await take(pieces, 0);
-  for (const { label, archive } of archives) {
-    source.layers.push(label);
-    const listed = (archive.files() ?? []).filter((n) => !n.startsWith("("));
-    if (!listed.length) source.probed.push(label);
-    const seen = new Set(listed.map(gameName));
-    for (const n of [...listed, ...probeNames(archive).filter((n2) => !seen.has(gameName(n2)))]) {
-      const info = archive.fileInfo(n);
-      if (!info) continue;
-      const read = async () => archive.readFile(n);
-      const key = gameName(n);
-      if (isSystemFile(key)) continue;
-      if (/\.(qdp|bwl)$/.test(key)) {
-        source.plugins.push({ name: n.split("\\").pop(), bytes: info.uncompressedSize, read, member: n, layer: label });
-        continue;
-      }
-      if (/\.(fgp|fgd)$/.test(key)) {
-        source.firegraft.push({ name: n.split("\\").pop(), bytes: info.uncompressedSize, read, member: n, layer: label });
-        continue;
-      }
-      source.files.set(key, { name: n, size: info.uncompressedSize, read, layer: label });
-    }
-  }
-  const root = modRoot(loose.map((p) => p.path));
-  const layer = root ? `${root}/` : "./";
-  if (loose.some((p) => !root || p.path.startsWith(root + "/"))) source.layers.push(layer);
-  for (const p of loose) {
-    if (root && !p.path.startsWith(root + "/")) {
-      source.left.push(p.path);
-      continue;
-    }
-    const rel = root ? p.path.slice(root.length + 1) : p.path;
-    if (!rel.includes("/")) {
-      source.left.push(p.path);
-      continue;
-    }
-    const key = gameName(rel);
-    const was = source.files.get(key);
-    if (was && was.layer === layer) source.duplicates.push(`${was.name} and ${rel.replace(/\//g, "\\")}`);
-    source.files.set(key, { name: rel.replace(/\//g, "\\"), size: p.size, read: p.read, layer });
-  }
-  if (kind === "folder" && source.exes.length === 1) source.name = leaf(source.exes[0].file).replace(/\.exe$/i, "");
-  if (modName) source.name = modName;
-  return source;
-}
-async function findTextFolder(pieces) {
-  for (const p of pieces) {
-    const parts = p.path.split("/");
-    if (parts[parts.length - 1] !== "mod.json" || parts.length > 2) continue;
-    let manifest = null;
-    try {
-      manifest = readManifest(new TextDecoder().decode(await p.read()));
-    } catch (e) {
-      throw new OpenError(e.message);
-    }
-    if (manifest) return { root: parts.slice(0, -1).join("/"), manifest };
-  }
-  return null;
-}
-async function openTextFolder(root, manifest, pieces, name, base) {
-  const source = emptySource("mod folder", manifest.name || name);
-  source.manifest = manifest;
-  source.layers.push(root ? `${root}/` : "./");
-  const inside = pieces.filter((p) => !root || p.path.startsWith(root + "/")).map((p) => ({ ...p, path: root ? p.path.slice(root.length + 1) : p.path }));
-  let names;
-  const ctx = () => ({ manifest, names });
-  const packed2 = /* @__PURE__ */ new Map();
-  const pack = (p) => {
-    let got = packed2.get(p.path);
-    if (!got) {
-      got = p.read().then((data) => packFile(p.path, data, ctx()));
-      packed2.set(p.path, got);
-    }
-    return got;
-  };
-  for (const p of inside) {
-    if (p.path === MOD_MANIFEST) continue;
-    if (isSystemFile(p.path)) {
-      source.left.push(p.path);
-      continue;
-    }
-    const of = memberOf(p.path, manifest);
-    if (!of) {
-      source.left.push(p.path);
-      continue;
-    }
-    if (of.form === "plugin" || of.form === "firegraft") {
-      const member = of.members[0];
-      const read = async () => (await pack(p))[0].data;
-      (of.form === "plugin" ? source.plugins : source.firegraft).push({ name: leaf(p.path), bytes: p.size, read, member, layer: source.layers[0] });
-      continue;
-    }
-    for (const member of of.form === "ai" ? of.members : [of.members[0]]) {
-      const read = async () => {
-        const got = (await pack(p)).find((m) => gameName(m.member) === gameName(member));
-        if (!got) throw new OpenError(t("{file} gave no {member}.", { file: p.path, member }));
-        return got.data;
-      };
-      source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path });
-    }
-  }
-  if (manifest.names !== "none" && [...source.files.keys()].some((k) => /^scripts\\(aiscript|bwscript)\.bin$/.test(k))) {
-    const read = async (member) => {
-      const f = source.files.get(gameName(member));
-      if (f) return f.read();
-      return manifest.names === "game" && base ? base(member) : null;
-    };
-    const tables2 = {};
-    for (const t2 of DAT_TABLES) {
-      for (const member of [`${DAT_SCHEMAS[t2].file}ex`, DAT_SCHEMAS[t2].file]) {
-        const bytes = await read(member);
-        if (bytes) {
-          tables2[t2] = decodeDat(datTableOf(member), bytes, { fileName: member });
-          break;
-        }
-      }
-    }
-    const tbl = async (member) => {
-      const b = await read(member);
-      return b ? decodeTblFile(b).strings : null;
-    };
-    names = namesOf(tables2, { stat: await tbl("rez\\stat_txt.tbl"), unitnames: await tbl("rez\\unitnames.tbl"), images: await tbl("arr\\images.tbl"), sfxdata: await tbl("arr\\sfxdata.tbl"), portdata: null, mapdata: null });
-  }
-  return source;
-}
-function looksLikeMod(paths) {
-  return paths.some((p) => /^[^/]+\/([^/]+\/)?(arr\/[^/]+\.dat(ex)?|scripts\/[^/]+\.bin|rez\/[^/]+\.tbl|unit\/.+\.grp)$/i.test(p) || /^[^/]+\/mod\.json$/i.test(p));
-}
-
 // stringsView.ts
 var ROW2 = 22;
 var REF_OF = { "rez\\stat_txt.tbl": "stat_txt.tbl", "arr\\images.tbl": "images.tbl", "arr\\sfxdata.tbl": "sfxdata.tbl", "arr\\portdata.tbl": "portdata.tbl", "arr\\mapdata.tbl": "mapdata.tbl" };
@@ -19419,6 +19477,8 @@ var ModEditor = class {
       this.live.follow(session);
       this.said = t("Opened in {s} s. {found}", { s: ((performance.now() - t0) / 1e3).toFixed(1), found: this.found });
       this.api.ui.status(this.found);
+      const copy = gameCopyNotice(source);
+      if (copy) this.api.ui.toast({ kind: "warn", title: copy, ttl: 0 });
       this.draw();
       await this.attach();
     } catch (e) {
