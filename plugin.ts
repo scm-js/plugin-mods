@@ -24,6 +24,8 @@ import { attachReader } from "./reader";
 import { changedZip, currentMembers, textFolder, writeMpq, writeZip } from "./save";
 import { Look } from "./look";
 import { PicturesView } from "./picturesView";
+import { RaceTable, racesApi, type DataSetRace } from "./races";
+import { RacesView } from "./racesView";
 import { ScriptsView } from "./scriptsView";
 import { SoundsView } from "./soundsView";
 import { ModSession } from "./session";
@@ -62,7 +64,7 @@ const COPY_HOLDS = /^(arr\/[^/]+$|scripts\/iscript\.bin$|unit\/|tileset\/|game\/
 /** The game's files the plugin keeps once read: small, and read again by every diff, check and string table. */
 const SMALL = /^(arr\/[^/]+$|scripts\/iscript\.bin$|tileset\/stat_txt\.tbl$|rez\/unitnames\.tbl$|unit\/manifest\.json$)/;
 
-type Tab = "tables" | "strings" | "pictures" | "sounds" | "scripts" | "overlays" | "grafts";
+type Tab = "tables" | "strings" | "pictures" | "sounds" | "scripts" | "overlays" | "grafts" | "races";
 
 class ModEditor {
   private readonly api: PluginApi;
@@ -78,6 +80,9 @@ class ModEditor {
   private sounds: SoundsView | null = null;
   private overlays: ScriptsView | null = null;
   private grafts: GraftsView | null = null;
+  private racesView: RacesView | null = null;
+  /** The races the open mod adds (`races.ts`): from its `mod.json`, then the editor's table for it. */
+  private races: RaceTable | null = null;
   /** Edits into a running test game (`live.ts`). */
   private readonly live = new LiveSender(() => this.status());
   private liveSvc: LiveService | null = null;
@@ -151,7 +156,7 @@ class ModEditor {
   /** Every tab's view goes (a language change, another mod); they are made again when shown. */
   private dropViews() {
     this.scripts?.dispose(); this.overlays?.dispose(); this.sounds?.dispose();
-    this.tables = null; this.strings = null; this.scripts = null; this.pictures = null; this.sounds = null; this.overlays = null; this.grafts = null;
+    this.tables = null; this.strings = null; this.scripts = null; this.pictures = null; this.sounds = null; this.overlays = null; this.grafts = null; this.racesView = null;
   }
 
   private draw() {
@@ -163,7 +168,7 @@ class ModEditor {
     const s = this.session;
     const tabs = h("div", { className: "mx-tabs" });
     const tabButton = (id: Tab, label: string) => h("button", { className: `mx-tab${this.tab === id ? " on" : ""}`, type: "button", dataset: { tab: id }, onclick: () => { this.tab = id; this.draw(); } }, label);
-    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("pictures", t("Pictures")), tabButton("sounds", t("Sounds")), tabButton("scripts", t("Scripts")), tabButton("overlays", t("Overlays")), tabButton("grafts", t("Requirements and Buttons")));
+    tabs.append(tabButton("tables", t("Tables")), tabButton("strings", t("Strings")), tabButton("pictures", t("Pictures")), tabButton("sounds", t("Sounds")), tabButton("scripts", t("Scripts")), tabButton("overlays", t("Overlays")), tabButton("grafts", t("Requirements and Buttons")), tabButton("races", t("Races")));
     const bar = h("div", { className: "mx-bar" },
       h("span", { className: "mx-grow", title: this.found }, h("b", null, s.source.name), " ", h("span", { className: "mx-dim" }, this.found.replace(/^[^,]*, /, ""))),
       button(t("Open…"), () => { this.closeMod(); }, { title: t("Close this mod and open another") }),
@@ -199,6 +204,7 @@ class ModEditor {
   private view(tab: Tab): HTMLElement {
     if (tab === "tables") { this.tables ??= new TablesView(this.context()); this.tables.refresh(); return this.tables.el; }
     if (tab === "strings") { this.strings ??= new StringsView(this.context()); this.strings.refresh(); return this.strings.el; }
+    if (tab === "races") { this.racesView ??= new RacesView(this.races!, (text) => this.say(text)); this.racesView.refresh(); return this.racesView.el; }
     this.look ??= new Look(this.session!);
     if (tab === "pictures") { this.pictures ??= new PicturesView(this.context(), this.look); this.pictures.refresh(); return this.pictures.el; }
     if (tab === "sounds") { this.sounds ??= new SoundsView(this.context()); this.sounds.refresh(); return this.sounds.el; }
@@ -291,6 +297,7 @@ class ModEditor {
       const source = await openPieces(pieces, name, base);
       const session = await ModSession.open(source, { base, baseHas: base ? (m) => this.baseHas(m) : undefined });
       this.session = session;
+      this.races = new RaceTable({ gameData: racesApi(this.api.gameData), profileId: () => (this.session === session ? this.profile().id : null), ours: () => this.session === session && this.isOurs() }, source.races);
       this.found = foundLine(source);
       this.tab = "tables";
       session.onChange(() => this.edited());
@@ -317,6 +324,7 @@ class ModEditor {
     this.look = null;
     const ours = !!this.attached && this.isOurs();
     this.session = null;
+    this.races = null;
     this.live.follow(null);
     this.attached = null;
     this.reader = null;
@@ -369,10 +377,17 @@ class ModEditor {
 
   /* ── Drawing from the mod ── */
 
+  /**
+   * The profile the mod is attached under. It carries the races the panel has for the mod (from its `mod.json`, or as
+   * the person named them), so the editor keeps them for the id; with none it carries no `races`, and the editor keeps
+   * what it had for the id. (An editor from before races a data set adds ignores the field.)
+   */
   private profile(): GameDataProfile {
     const name = this.session!.source.name;
     const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "mod";
-    return { id, name };
+    const races = this.races?.rows ?? [];
+    const profile: GameDataProfile & { races?: DataSetRace[] } = { id, name, ...(races.length ? { races: races.map((r) => ({ ...r })) } : {}) };
+    return profile;
   }
 
   private isOurs(): boolean {
@@ -398,6 +413,8 @@ class ModEditor {
     if (this.session !== session) return;
     const source = await gd.attach(profile, this.reader, hash ? { hash } : undefined);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
+    // The editor's table for the mod: what was handed in, or what it kept for the id before.
+    if (this.races?.load()) this.racesView?.refresh();
     this.provide();
     this.status();
     if (!hash) {
@@ -417,6 +434,8 @@ class ModEditor {
 
   /** The editor's data set moved: another was chosen, or ours came back. */
   sourceChanged() {
+    // (Races named for the mod elsewhere — another plugin, a script — show here.)
+    if (this.attached && this.isOurs() && this.races?.load() && this.tab === "races") this.racesView?.refresh();
     if (!this.attached || this.isOurs()) return;
     this.attached = null;
     this.provide();
@@ -431,6 +450,7 @@ class ModEditor {
     else if (this.tab === "sounds") this.sounds?.refresh();
     else if (this.tab === "overlays") this.overlays?.refresh();
     else if (this.tab === "grafts") this.grafts?.refresh();
+    else if (this.tab === "races") this.racesView?.refresh();
     else this.scripts?.refresh();
     clearTimeout(this.update.timer);
     this.update.timer = window.setTimeout(() => void this.redraw(), 400);
@@ -488,7 +508,7 @@ class ModEditor {
         fileName = `${s.source.name}.mpq`;
         what = t("{n} files in an MPQ, {size}", { n: num(members.length), size: sizeText(bytes.length) });
       } else if (form === "folder") {
-        const { files, manifest } = await textFolder(s, (done, total) => progress.report(done / total * 0.9, t("{done} of {total} files…", { done: num(done), total: num(total) })));
+        const { files, manifest } = await textFolder(s, (done, total) => progress.report(done / total * 0.9, t("{done} of {total} files…", { done: num(done), total: num(total) })), this.races?.rows ?? s.source.races);
         bytes = writeZip(files, s.source.name);
         fileName = `${s.source.name}.zip`;
         const kept = manifest.kept.reduce((n, k) => n + k.files.length, 0);

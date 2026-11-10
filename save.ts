@@ -9,6 +9,7 @@ import {
   DEFAULT_PALETTE, MOD_FOLDERS, MOD_MANIFEST, datTableOf, emptyManifest, folderPath, gameName, recordRendered, renderAiScripts, renderMember, tidyManifest,
   type DatTableName, type ModManifest, type Rendered,
 } from "@scm-js/core";
+import { normalizeRaces, type DataSetRace } from "./races";
 import type { ModSession } from "./session";
 import { gameCopies } from "./source";
 
@@ -39,8 +40,10 @@ export interface FolderFile { file: string; data: Uint8Array }
 /**
  * The mod as `scmjs mod unpack` lays it out: tables, strings, scripts and overlays as text, GRPs as PNG sheets drawn in
  * `palette` (the mod's `tileset\<name>.wpe`, else the game's), and `mod.json`. `progress` is called after each member.
+ * `races` is the table of races the mod adds, written as `mod.json`'s `races` (left out when empty, so a mod that names
+ * none writes the file it always did); without it, the races the mod came with.
  */
-export async function textFolder(session: ModSession, progress?: (done: number, total: number) => void): Promise<{ files: FolderFile[]; manifest: ModManifest }> {
+export async function textFolder(session: ModSession, progress?: (done: number, total: number) => void, races: readonly DataSetRace[] = session.source.races): Promise<{ files: FolderFile[]; manifest: ModManifest & { races?: DataSetRace[] } }> {
   const manifest = emptyManifest(session.source.name);
   manifest.layers = [...session.source.layers];
   manifest.palette = session.source.manifest?.palette ?? DEFAULT_PALETTE;
@@ -108,6 +111,9 @@ export async function textFolder(session: ModSession, progress?: (done: number, 
   if (session.source.probed.length) manifest.notes.push(`${session.source.probed.join(", ")} had no list of its files: only the names the game reads were found in it`);
   if (!palette) manifest.notes.push(`no palette ${manifest.palette} was found (the mod's tileset\\${manifest.palette}.wpe, or the game's): the GRPs are kept as bytes`);
   tidyManifest(manifest);
+  // (Set after the tidying, which in `@scm-js/core` 0.13 knows no `races`: the key comes last in the file.)
+  const declared = normalizeRaces(races);
+  if (declared.length) (manifest as ModManifest & { races?: DataSetRace[] }).races = declared;
   files.push({ file: MOD_MANIFEST, data: new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`) });
   files.sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
   return { files, manifest };
