@@ -55,6 +55,30 @@ still a mod.
   strings in `stat_txt.tbl` they are. A requirement list is lines in words — `current unit is Terran Barracks (111)`,
   `owns Terran Academy (112)`, `is not lifted off`, `or` — read back as you change them. A mod without grafts takes the
   game's own from a running test game (they are read out of its memory) and edits those.
+- **Races** — the races the mod gives players past the game's own. A player's race is a number: 0 to 7 are the game's
+  (Zerg, Terran, Protoss, and five the game uses for itself), and a mod may use others, but none of its files says
+  what they are called. Name them here: a row a race, with its number (8 to 255), its name, the letter its own files
+  go by (`a` for `game\aconsole.pcx` and `rez\statbtna.bin`; empty when it has none) and the game's race it plays as,
+  if you know it. The editor then shows the name wherever a player's race is shown, instead of `Race 69`. A row is
+  checked as you type: a number the game uses or another row has, an empty name or one over 40 characters, and the
+  game's own letters (z, t, p, n) are refused.
+
+  The number is not in any of the mod's files. Open a replay or a map made with the mod: a player whose race has no
+  name shows as `Race` and the number. The names the mod's `rez\network.tbl` has past the game's own, and the letters
+  it has a console picture or status buttons for, are offered as buttons for the row you are typing; they are
+  guesses, and nothing is filled in until you click one.
+
+  The names are not part of the mod's files, so naming a race leaves its hash as it was. The editor keeps them for
+  the mod (a new release of it too), and saving the mod as a folder writes them into its `mod.json` as `races`:
+
+  ```json
+  "races": [{ "id": 69, "name": "Askosi", "letter": "a", "like": 1 }]
+  ```
+
+  (`like` is 0 Zerg, 1 Terran, 2 Protoss.) A folder opened with a `mod.json` that has `races` hands them to the
+  editor, and Play and Start Test Game hand them to the play page with the mod, so its setup screen offers them. A
+  mod that names none writes `mod.json` as before. An editor from before race names shows the table but
+  cannot keep it; the races a `mod.json` has are still written back when the mod is saved as a folder.
 
 **The map follows the mod.** While a mod is open the editor draws from it: the unit palette shows its units and names,
 the settings dialogs its defaults, the map its pictures. Change a unit's hit points and Unit Settings shows the new

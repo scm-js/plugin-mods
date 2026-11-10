@@ -8,6 +8,7 @@
  */
 import { Archive } from "mopaq";
 import { t } from "./i18n";
+import { normalizeRaces, type DataSetRace } from "./races";
 import {
   DAT_SCHEMAS, DAT_TABLES, GAME_FOLDERS, MOD_MANIFEST, decodeTblFile, entryText, exeArchive, gameName, isMpq, isZip, memberOf, modRoot, namesOf, packFile, readManifest, readZip,
   decodeDat, datTableOf, type DatTableName, type ModData, type ModManifest, type ModNames,
@@ -133,12 +134,17 @@ export interface ModSource {
   probed: string[];
   /** A text folder's manifest (`mod.json`); null for anything else. */
   manifest: ModManifest | null;
+  /**
+   * The races the mod adds, as a `mod.json` at the top of what was handed over declares them (`races`, normalized; a row
+   * that is no race left out). Empty when none are declared. No file of the mod's: they never reach its hash.
+   */
+  races: DataSetRace[];
 }
 
 export class OpenError extends Error {}
 
 export function emptySource(kind: SourceKind, name: string): ModSource {
-  return { kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null };
+  return { kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null, races: [] };
 }
 
 /** The names the game reads, to look for in an archive that has no list of its files. */
@@ -192,6 +198,7 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
   const loose: Piece[] = [];
   const archives: { label: string; archive: Archive }[] = [];
   let modName: string | null = null;
+  let races: DataSetRace[] = [];
   const take = async (list: Piece[], depth: number): Promise<void> => {
     // A copy of the game among several pieces (a folder's, a zip's members) is left out unread; the one file the person
     // named (an old mod's lone `patch_rt.mpq`) is opened as it is.
@@ -206,7 +213,13 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
       if (/\.(qdp|bwl)$/.test(l)) { source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
       if (/\.(fgp|fgd)$/.test(l)) { source.firegraft.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
       if (l === "mod.json" && p.path.split("/").length <= 2) {
-        try { const n = JSON.parse(new TextDecoder().decode(await p.read())).name; if (typeof n === "string" && n.trim()) modName = n.trim(); } catch { /* not ours to read */ }
+        try {
+          const json = JSON.parse(new TextDecoder().decode(await p.read()));
+          const n = json?.name;
+          if (typeof n === "string" && n.trim()) modName = n.trim();
+          const declared = normalizeRaces(json?.races);
+          if (declared.length) races = declared;
+        } catch { /* not ours to read */ }
         continue;
       }
       if (!/\.(zip|mpq|exe)$/.test(l)) { loose.push(p); continue; }
@@ -263,6 +276,7 @@ async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Prom
   // A folder the mod's makers ship holds its launcher: the one exe with an archive in it is named as the mod is.
   if (kind === "folder" && source.exes.length === 1) source.name = leaf(source.exes[0].file).replace(/\.exe$/i, "");
   if (modName) source.name = modName;
+  source.races = races;
   source.gameCopy.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   // With a copy of the game left out, what else came with it may be only the game's own loose files (a read-me, its
   // dlls, a zip of shaders): a mod is an archive laid as a layer, a plugin or FireGraft file, or a loose file under one
@@ -295,6 +309,8 @@ async function findTextFolder(pieces: Piece[]): Promise<{ root: string; manifest
 async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece[], name: string, base: ((member: string) => Promise<Uint8Array | null>) | null): Promise<ModSource> {
   const source = emptySource("mod folder", manifest.name || name);
   source.manifest = manifest;
+  // (`@scm-js/core` 0.13's `readManifest` keeps a key it does not know as it was written, unchecked: read by the rule here.)
+  source.races = normalizeRaces((manifest as ModManifest & { races?: unknown }).races);
   source.layers.push(root ? `${root}/` : "./");
   const inside = pieces.filter((p) => !root || p.path.startsWith(root + "/")).map((p) => ({ ...p, path: root ? p.path.slice(root.length + 1) : p.path }));
   let names: ModNames | null | undefined;

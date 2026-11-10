@@ -9,6 +9,7 @@
  */
 import { gameName } from "@scm-js/core";
 import { t } from "./i18n";
+import type { DataSetRace } from "./races";
 import type { EditEvent, ModSession } from "./session";
 
 export interface LiveField { table: string; id: number; field: string; part?: string; value: number }
@@ -16,7 +17,7 @@ export interface LiveFile { path: string; bytes: Uint8Array }
 export interface LiveItem { table?: string; id?: number; field?: string; part?: string; value?: number; was?: number; path?: string; message: string }
 export interface LiveAnswer { applied: LiveItem[]; deferred: LiveItem[]; errors: LiveItem[]; frame?: number }
 export interface LiveState { running: boolean; alone: boolean; frame: number; mod: { hash: string; name: string } | null; waiting: string[] }
-export interface LiveTest { map: { bytes: Uint8Array; name: string } | null; mod: { name: string; hash: string; files: LiveFile[] }; useMapSettings?: boolean }
+export interface LiveTest { map: { bytes: Uint8Array; name: string } | null; mod: { name: string; hash: string; files: LiveFile[]; races?: DataSetRace[] }; useMapSettings?: boolean }
 
 /** `scm-sim.live`, as far as this plugin uses it. */
 export interface LiveService {
