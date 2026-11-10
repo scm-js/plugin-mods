@@ -76,7 +76,8 @@ still a mod.
   ```
 
   (`like` is 0 Zerg, 1 Terran, 2 Protoss.) A folder opened with a `mod.json` that has `races` hands them to the
-  editor. A mod that names none writes `mod.json` as before. An editor from before race names shows the table but
+  editor, and Play and Start Test Game hand them to the play page with the mod, so its setup screen offers them. A
+  mod that names none writes `mod.json` as before. An editor from before race names shows the table but
   cannot keep it; the races a `mod.json` has are still written back when the mod is saved as a folder.
 
 **The map follows the mod.** While a mod is open the editor draws from it: the unit palette shows its units and names,

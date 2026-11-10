@@ -4,6 +4,7 @@ import { RaceTable, Refusal, checkRow, draftOf, emptyDraft, normalizeRaces, type
 import { openPieces } from "../source";
 import { ModSession } from "../session";
 import { textFolder } from "../save";
+import { playMessage } from "../play";
 import { bytesPiece, madeFolder } from "./support";
 
 // (A mod's fourth race, as one mod gives it: byte 69, its files under the letter a.)
@@ -256,5 +257,15 @@ describe("mod.json", () => {
     // (No file of the mod's: its hash is the folder's without it.)
     const without = await ModSession.open(await openPieces(madeFolder(), "made"), { base: null });
     expect(await (await ModSession.open(source, { base: null })).hash()).toBe(await without.hash());
+  });
+});
+
+describe("the play page's hand-over", () => {
+  it("carries the races the mod adds beside its name, and none when there are none", () => {
+    const files = [{ name: "arr\\units.dat", bytes: new Uint8Array([1]) }];
+    const named = playMessage({ name: "Made", hash: "0123456789abcdef", files, races: [ASKOSI] }) as { dataSet: { races?: DataSetRace[] } };
+    expect(named.dataSet.races).toEqual([ASKOSI]);
+    const plain = playMessage({ name: "Made", hash: "0123456789abcdef", files, races: [] }) as { dataSet: Record<string, unknown> };
+    expect("races" in plain.dataSet).toBe(false);
   });
 });

@@ -3,7 +3,7 @@
  * plugin-scm-sim's Test Map and `scmjs mod play` have with it:
  *
  *   ← `{ type: "scmjs.play.ready" }`                                  the play page, each time it loads
- *   → `{ type: "scmjs.play", dataSet: { name, hash, files: [{ path, file }] }, map?, name? }`
+ *   → `{ type: "scmjs.play", dataSet: { name, hash, files: [{ path, file }], races? }, map?, name? }`
  *   ← `{ type: "scmjs.play.started" }` / `{ type: "scmjs.play.shown" }` / `{ type: "scmjs.play.error", message }`
  *
  * `files` are the mod's files that differ from the game's (`path` the game's path in lower case with forward slashes,
@@ -12,11 +12,15 @@
  * Mods dialog. Nothing leaves the person's browser.
  */
 
+import type { DataSetRace } from "./races";
+
 export interface PlayHandoff {
   name: string;
   hash: string;
   files: { name: string; bytes: Uint8Array }[];
   map?: { bytes: Uint8Array; name: string } | null;
+  /** The races the mod adds (the Races tab's rows), handed with its data set; none: left out. */
+  races?: readonly DataSetRace[];
 }
 
 export type PlayOutcome = "started" | "shown";
@@ -52,6 +56,7 @@ export function playMessage(h: PlayHandoff): Record<string, unknown> {
     dataSet: {
       name: h.name, hash: h.hash,
       files: h.files.map((f) => ({ path: f.name.toLowerCase().replace(/\\/g, "/"), file: new File([f.bytes as Uint8Array<ArrayBuffer>], f.name.split("\\").pop()!) })),
+      ...(h.races?.length ? { races: h.races.map((r) => ({ ...r })) } : {}),
     },
     ...(h.map ? { map: h.map.bytes.slice(), name: h.map.name } : {}),
   };

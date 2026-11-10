@@ -626,7 +626,8 @@ class ModEditor {
         map = { bytes: serializeScenario(createScenario({ width: 64, height: 64, era: 0, name: t("Blank map") })), name: "blank.chk" };
         blank = true;
       }
-      return { map, mod: { name: s.source.name, hash, files: files.map((f) => ({ path: livePath(f.name), bytes: f.bytes })) }, ...(blank ? { useMapSettings: true } : {}) };
+      const races = this.races?.rows ?? [];
+      return { map, mod: { name: s.source.name, hash, files: files.map((f) => ({ path: livePath(f.name), bytes: f.bytes })), ...(races.length ? { races: races.map((r) => ({ ...r })) } : {}) }, ...(blank ? { useMapSettings: true } : {}) };
     })();
     svc.play(test).then(
       (outcome) => this.say(outcome === "started" ? t("The test game is running with {name}: each edit goes into it.", { name: s.source.name }) : t("The play page has {name}; choose a map there.", { name: s.source.name })),
@@ -656,7 +657,7 @@ class ModEditor {
         if (file) map = { bytes: new Uint8Array(await file.arrayBuffer()), name: file.name };
       }
       try {
-        const outcome = await this.playTab!.play(playMessage({ name: s.source.name, hash, files, map }));
+        const outcome = await this.playTab!.play(playMessage({ name: s.source.name, hash, files, map, races: this.races?.rows ?? [] }));
         this.say(outcome === "started"
           ? t("Playing {map} with {name} ({n} files, {hash}).", { map: map?.name ?? "", name: s.source.name, n: num(files.length), hash })
           : t("The play page has {name} ({n} files, {hash}); choose a map there.", { name: s.source.name, n: num(files.length), hash }));
