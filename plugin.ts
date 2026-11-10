@@ -204,7 +204,7 @@ class ModEditor {
   private view(tab: Tab): HTMLElement {
     if (tab === "tables") { this.tables ??= new TablesView(this.context()); this.tables.refresh(); return this.tables.el; }
     if (tab === "strings") { this.strings ??= new StringsView(this.context()); this.strings.refresh(); return this.strings.el; }
-    if (tab === "races") { this.racesView ??= new RacesView(this.races!, (text) => this.say(text)); this.racesView.refresh(); return this.racesView.el; }
+    if (tab === "races") { this.racesView ??= new RacesView(this.races!, (text) => this.say(text), (text) => { if (this.said === text) this.say(""); }); this.racesView.refresh(); return this.racesView.el; }
     this.look ??= new Look(this.session!);
     if (tab === "pictures") { this.pictures ??= new PicturesView(this.context(), this.look); this.pictures.refresh(); return this.pictures.el; }
     if (tab === "sounds") { this.sounds ??= new SoundsView(this.context()); this.sounds.refresh(); return this.sounds.el; }

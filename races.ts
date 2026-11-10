@@ -207,5 +207,34 @@ export class RaceTable {
   }
 }
 
+/**
+ * A refusal of the row as typed, said in the panel's status line when Add is pressed. Once the row changes it is about
+ * a row that is no longer there, so `changed` takes it back: `unsay(text)` clears the status line if it still says it
+ * (and leaves it when something else was said since).
+ */
+export class Refusal {
+  private said: string | null = null;
+  private readonly say: (text: string) => void;
+  private readonly unsay: (text: string) => void;
+
+  constructor(say: (text: string) => void, unsay: (text: string) => void) {
+    this.say = say;
+    this.unsay = unsay;
+  }
+
+  refuse(text: string) {
+    this.said = text;
+    this.say(text);
+  }
+
+  /** The row changed (a field typed in, a hint taken, Cancel, another row chosen, a row kept). */
+  changed() {
+    if (this.said === null) return;
+    const text = this.said;
+    this.said = null;
+    this.unsay(text);
+  }
+}
+
 /** `api.gameData` as the calls the Races tab may find on it. */
 export const racesApi = (gameData: object): RacesApi => gameData as RacesApi;

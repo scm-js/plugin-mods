@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readManifest } from "@scm-js/core";
-import { RaceTable, checkRow, draftOf, emptyDraft, normalizeRaces, type DataSetRace, type RacesApi } from "../races";
+import { RaceTable, Refusal, checkRow, draftOf, emptyDraft, normalizeRaces, type DataSetRace, type RacesApi } from "../races";
 import { openPieces } from "../source";
 import { ModSession } from "../session";
 import { textFolder } from "../save";
@@ -134,6 +134,38 @@ describe("the Races tab's table", () => {
     expect(table.remove(69)).toBe(false);
     expect(table.rows).toEqual([ASKOSI]);
     expect(await table.hints()).toEqual({ names: [], letters: [] });
+  });
+});
+
+describe("a refusal in the status line", () => {
+  /** The panel's status line: `unsay` clears it only while it still says the refusal. */
+  const statusLine = () => {
+    const line = { text: "" };
+    const refusal = new Refusal((text) => { line.text = text; }, (text) => { if (line.text === text) line.text = ""; });
+    return { line, refusal };
+  };
+
+  it("is said on Add, and taken back as soon as the row changes", () => {
+    const { line, refusal } = statusLine();
+    const rows = [ASKOSI];
+    const draft = { ...emptyDraft(), id: "70" };
+    const { errors } = checkRow(draft, rows, null);
+    refusal.refuse(errors.name!);
+    expect(line.text).toBe("Give the race a name.");
+    refusal.changed();
+    expect(line.text).toBe("");
+    // (Taken back once: a later change says nothing.)
+    line.text = "Race 70 added: Bloodsummon.";
+    refusal.changed();
+    expect(line.text).toBe("Race 70 added: Bloodsummon.");
+  });
+
+  it("leaves the status line alone when something else was said since", () => {
+    const { line, refusal } = statusLine();
+    refusal.refuse("Give the race a name.");
+    line.text = "stat_txt.tbl entry 3 changed.";
+    refusal.changed();
+    expect(line.text).toBe("stat_txt.tbl entry 3 changed.");
   });
 });
 

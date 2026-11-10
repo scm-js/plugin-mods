@@ -7,12 +7,16 @@
  */
 import { button, clear, h } from "./dom";
 import { t, translate } from "./i18n";
-import { GAME_RACES, RaceTable, checkRow, draftOf, emptyDraft, type RaceDraft, type RaceField } from "./races";
+import { GAME_RACES, RaceTable, Refusal, checkRow, draftOf, emptyDraft, type RaceDraft, type RaceField } from "./races";
 
 export class RacesView {
   readonly el: HTMLElement;
+  /** What scrolls when the tab is taller than the panel (the tab itself only fills it, as the other tabs do). */
+  private readonly scroller: HTMLElement;
   private readonly table: RaceTable;
   private readonly say: (text: string) => void;
+  /** A refusal said in the status line on Add, taken back once the row changes. */
+  private readonly refusal: Refusal;
   /** The row being edited: its id, or null for a new row. */
   private editing: number | null = null;
   private draft: RaceDraft = emptyDraft();
@@ -21,10 +25,13 @@ export class RacesView {
   private hints: { names: string[]; letters: string[] } = { names: [], letters: [] };
   private asked = 0;
 
-  constructor(table: RaceTable, say: (text: string) => void) {
+  /** `unsay` clears the status line when it still says `text`. */
+  constructor(table: RaceTable, say: (text: string) => void, unsay: (text: string) => void) {
     this.table = table;
     this.say = say;
-    this.el = h("div", { className: "mx-races", style: "flex: 1; min-height: 0; overflow: auto; padding: 4px 8px" });
+    this.refusal = new Refusal(say, unsay);
+    this.scroller = h("div", { className: "mx-races", style: "flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px" });
+    this.el = h("div", { className: "mx-col", style: "flex: 1" }, this.scroller);
   }
 
   /** The table may have changed (the editor's, a load): draw it again, and ask for the hints again. */
@@ -39,7 +46,7 @@ export class RacesView {
   }
 
   private draw() {
-    const el = this.el;
+    const el = this.scroller, top = el.scrollTop;
     clear(el);
     const rows = this.table.rows, keeps = this.table.canKeep;
     el.append(h("p", { className: "mx-dim" }, t("A mod can give players races past the game's own. Its files do not say what they are called, so name them here: the editor then shows the name wherever a player's race is shown, and saving the mod as a folder writes them into its mod.json. The mod's files and its hash do not change.")));
@@ -53,13 +60,15 @@ export class RacesView {
         h("td", { style: "padding: 1px 8px 1px 0" }, r.name),
         h("td", { style: "padding: 1px 8px 1px 0" }, r.letter ?? h("span", { className: "mx-faint" }, t("none"))),
         h("td", { style: "padding: 1px 8px 1px 0" }, r.like === undefined ? h("span", { className: "mx-faint" }, t("not said")) : translate(GAME_RACES[r.like])),
-        h("td", { style: "white-space: nowrap" }, keeps ? button(t("Edit"), () => { this.editing = r.id; this.draft = draftOf(r); this.showAll = false; this.draw(); }) : null, " ",
+        h("td", { style: "white-space: nowrap" }, keeps ? button(t("Edit"), () => { this.editing = r.id; this.draft = draftOf(r); this.showAll = false; this.refusal.changed(); this.draw(); }) : null, " ",
           keeps ? button("×", () => this.remove(r.id), { title: t("Remove this race") }) : null)));
     }
     if (!rows.length) grid.append(h("tr", null, h("td", { colSpan: 5, className: "mx-faint", style: "padding: 2px 0" }, t("No races are named for this mod."))));
     el.append(grid);
     if (keeps) el.append(this.form());
     el.append(h("p", { className: "mx-faint" }, t("A race's number is not in any of the mod's files. To find it, open a replay or a map made with the mod: a player whose race has no name here shows as Race and the number, such as Race 9.")));
+    // (Drawn again on every change and when the hints arrive: kept where the person had scrolled to.)
+    el.scrollTop = top;
   }
 
   /** The row being added or edited, each field's refusal beside it as it is typed. */
@@ -72,7 +81,7 @@ export class RacesView {
       name: h("input", { type: "text", value: d.name, style: "width: 180px", maxLength: 60 }),
       letter: h("input", { type: "text", value: d.letter, style: "width: 36px", maxLength: 1, title: t("The lower-case letter its own files go by, as in game\\<letter>console.pcx; empty when it has none") }),
     };
-    const like = h("select", { onchange: () => { this.draft.like = like.value; } },
+    const like = h("select", { onchange: () => { this.draft.like = like.value; this.refusal.changed(); } },
       h("option", { value: "" }, t("not said")), ...[0, 1, 2].map((v) => h("option", { value: String(v) }, translate(GAME_RACES[v])))) as HTMLSelectElement;
     like.value = d.like;
     const check = () => {
@@ -87,7 +96,8 @@ export class RacesView {
       }
       save.disabled = (["id", "name", "letter"] as const).some((f) => shown(f));
     };
-    for (const f of ["id", "name", "letter"] as const) inputs[f].addEventListener("input", () => { this.draft[f] = inputs[f].value; check(); });
+    // (A change to the row takes back a refusal the status line still shows: it was about the row as it was.)
+    for (const f of ["id", "name", "letter"] as const) inputs[f].addEventListener("input", () => { this.draft[f] = inputs[f].value; this.refusal.changed(); check(); });
     inputs.name.addEventListener("keydown", (e) => { if (e.key === "Enter") this.put(); });
     check();
 
@@ -99,12 +109,12 @@ export class RacesView {
         h("label", null, t("Letter"), inputs.letter),
         h("label", null, t("Plays as"), like),
         save,
-        this.editing !== null ? button(t("Cancel"), () => { this.editing = null; this.draft = emptyDraft(); this.showAll = false; this.draw(); }) : null),
+        this.editing !== null ? button(t("Cancel"), () => { this.editing = null; this.draft = emptyDraft(); this.showAll = false; this.refusal.changed(); this.draw(); }) : null),
       errorsEl);
 
     const { names, letters } = this.hints;
     if (names.length || letters.length) {
-      const take = (f: "name" | "letter", value: string) => { this.draft[f] = value; inputs[f].value = value; check(); };
+      const take = (f: "name" | "letter", value: string) => { this.draft[f] = value; inputs[f].value = value; this.refusal.changed(); check(); };
       box.append(h("p", { className: "mx-dim", style: "margin: 4px 0 2px" }, t("Found in the mod's files: names its network.tbl has past the game's own, and letters it has a console picture or status buttons for. They are guesses; check one before you use it.")));
       if (names.length) box.append(h("div", { className: "mx-bar", dataset: { hints: "name" } }, h("span", { className: "mx-dim" }, t("Name")), ...names.map((n) => button(n, () => take("name", n), { title: t("Use this name") }))));
       if (letters.length) box.append(h("div", { className: "mx-bar", dataset: { hints: "letter" } }, h("span", { className: "mx-dim" }, t("Letter")), ...letters.map((l) => button(l, () => take("letter", l), { title: t("Use this letter") }))));
@@ -117,12 +127,13 @@ export class RacesView {
     const { ok, errors } = this.table.put(this.draft, editing);
     if (!ok) {
       const first = Object.values(errors)[0];
-      if (first) this.say(first);
+      if (first) this.refusal.refuse(first);
       this.showAll = true;
       this.draw();
       return;
     }
     const id = Number(this.draft.id.trim());
+    this.refusal.changed();
     this.say(editing === null ? t("Race {n} added: {name}.", { n: id, name: this.draft.name.trim() }) : t("Race {n} changed.", { n: id }));
     this.editing = null;
     this.draft = emptyDraft();
@@ -133,7 +144,8 @@ export class RacesView {
   private remove(id: number) {
     const was = this.table.rows.find((r) => r.id === id);
     if (!this.table.remove(id)) return;
-    if (this.editing === id) { this.editing = null; this.draft = emptyDraft(); }
+    if (this.editing === id) { this.editing = null; this.draft = emptyDraft(); this.showAll = false; }
+    this.refusal.changed();
     this.say(t("Race {n} removed: {name}.", { n: id, name: was?.name ?? "" }));
     this.refresh();
   }
