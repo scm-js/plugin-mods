@@ -2031,6 +2031,18 @@ async function compressSectorAsync(data, method = "zlib") {
   if (method === "pkware") return compressSector(data, method);
   return packCompressed(await runAsync((d, cb) => zlib(d, { level: COMPRESSION_LEVEL }, cb), deflate, data), data, 2);
 }
+var MAX_TABLE_BYTES = 268435456;
+var TABLE_OUTSIDE = /^(Hash|Block) table extends beyond archive$/;
+function headerAt(view2, buf, pos) {
+  if (pos + 4 > buf.length) return null;
+  const magic = view2.getUint32(pos, true);
+  if (magic === 441536589) return pos + 32 <= buf.length ? pos : null;
+  if (magic !== 458313805 || pos + 12 > buf.length) return null;
+  const realPos = readUserHeader(view2, pos).fileHeaderOffset + pos;
+  if (realPos + 32 > buf.length) return null;
+  if (view2.getUint32(realPos, true) !== 441536589) throw new MpqError("Corrupted", "User header points to invalid MPQ header");
+  return realPos;
+}
 var Archive = class Archive2 {
   /** The raw archive data */
   data;
@@ -2038,63 +2050,115 @@ var Archive = class Archive2 {
   archiveStart;
   /** Parsed header */
   header;
-  /** Sector size in bytes */
   /** Sector size in bytes, from the header. */
   sectorSize;
   /** Hash table */
   hashTable;
   /** Block table */
   blockTable;
-  constructor(data, archiveStart, header, sectorSize, hashTable, blockTable) {
+  /** Where the tables were read from, and how much of them. */
+  tables;
+  constructor(data, archiveStart, header, sectorSize, hashTable, blockTable, tables2) {
     this.data = data;
     this.archiveStart = archiveStart;
     this.header = header;
     this.sectorSize = sectorSize;
     this.hashTable = hashTable;
     this.blockTable = blockTable;
+    this.tables = tables2;
+  }
+  /** Where a position the archive stores (relative to its header) is in the data: 32-bit wrapping, as storm adds them. */
+  offsetOf(rel) {
+    return (this.archiveStart + rel) % 4294967296;
   }
   /**
   * Open an MPQ archive from a buffer.
-  * Scans for the archive header at 512-byte boundaries.
+  *
+  * Without `options.offset` the header is looked for at 512-byte boundaries from the
+  * start, as storm looks for one; a header whose tables lie outside the data is passed
+  * over (a protector's fake) and the search goes on. With it, the header must be there.
+  *
+  * Positions are read as the game's storm reads a version 0 archive: relative to the
+  * header in 32-bit arithmetic, so a table (or a file) may lie *before* the header — a
+  * map protector's trick, and how some mod patchers lay out their archive. Hand over the
+  * whole file and the header's `offset` for such an archive: a slice starting at the
+  * header cannot reach what lies before it. See `OpenOptions`.
   *
   * Accepts any `Uint8Array`, including a Node.js `Buffer`.
   */
-  static open(data) {
+  static open(data, options = {}) {
     const buf = data;
     const view2 = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    if (options.offset !== void 0) {
+      const at = options.offset;
+      if (!Number.isInteger(at) || at < 0 || at + 32 > buf.length) throw new MpqError("NoHeader", `No MPQ header at offset ${at}: it is not inside the data`);
+      const headerOffset = headerAt(view2, buf, at);
+      if (headerOffset === null) throw new MpqError("NoHeader", `No MPQ header at offset ${at}`);
+      return Archive2.at(buf, view2, headerOffset);
+    }
     const maxBoundary = Math.floor(buf.length / 512);
-    let archiveStart = -1;
-    let headerOffset = -1;
+    let fake = null;
     for (let i2 = 0; i2 <= maxBoundary; i2++) {
       const pos = i2 * 512;
       if (pos + 4 > buf.length) break;
-      const magic = view2.getUint32(pos, true);
-      if (magic === 458313805) {
-        if (pos + 12 > buf.length) continue;
-        const realPos = readUserHeader(view2, pos).fileHeaderOffset + pos;
-        if (realPos + 32 > buf.length) continue;
-        if (view2.getUint32(realPos, true) !== 441536589) throw new MpqError("Corrupted", "User header points to invalid MPQ header");
-        archiveStart = realPos;
-        headerOffset = realPos;
-        break;
-      } else if (magic === 441536589) {
-        archiveStart = pos;
-        headerOffset = pos;
-        break;
+      const headerOffset = headerAt(view2, buf, pos);
+      if (headerOffset === null) continue;
+      try {
+        return Archive2.at(buf, view2, headerOffset);
+      } catch (e) {
+        if (e instanceof MpqError && e.kind === "Corrupted" && TABLE_OUTSIDE.test(e.detail ?? "")) {
+          fake ??= e;
+          continue;
+        }
+        throw e;
       }
     }
-    if (archiveStart === -1 || headerOffset === -1) throw new MpqError("NoHeader", "No valid MPQ header found");
-    const header = readFileHeader(view2, headerOffset);
+    throw fake ?? new MpqError("NoHeader", "No valid MPQ header found");
+  }
+  /**
+  * The archive whose header is at `archiveStart`. Follows the game's storm for a version 0
+  * archive, as StormLib documents it (`SBaseFileTable.cpp`: `ConvertMpqHeaderToFormat4`,
+  * `FileOffsetFromMpqOffset`, `LoadMpqTable`):
+  *
+  * - a table's position and a file's are the header's position plus the stored one,
+  *   modulo 2^32;
+  * - a table whose start lies past the end of the data means the header is no archive's;
+  * - a table that runs past the end is read as far as the data goes: the block table is
+  *   cut to the entries that fit, the hash table's missing entries are empty slots;
+  * - the header's own size field and its archive size are not believed: a version 0
+  *   header is 32 bytes, and the size reported is the header's only where the data holds
+  *   that much.
+  */
+  static at(buf, view2, archiveStart) {
+    const header = readFileHeader(view2, archiveStart);
     const sectorSize = 512 * Math.pow(2, header.blockSize);
-    const hashTableStart = archiveStart + header.hashTableOffset;
-    const hashTableBytes = header.hashTableEntries * 16;
-    if (hashTableStart + hashTableBytes > buf.length) throw new MpqError("Corrupted", "Hash table extends beyond archive");
-    const hashTable = readHashTable(buf.subarray(hashTableStart, hashTableStart + hashTableBytes), header.hashTableEntries);
-    const blockTableStart = archiveStart + header.blockTableOffset;
-    const blockTableBytes = header.blockTableEntries * 16;
-    if (blockTableStart + blockTableBytes > buf.length) throw new MpqError("Corrupted", "Block table extends beyond archive");
-    const blockTable = readBlockTable(buf.subarray(blockTableStart, blockTableStart + blockTableBytes), header.blockTableEntries);
-    return new Archive2(buf, archiveStart, header, sectorSize, hashTable, blockTable);
+    const wrap = (rel) => (archiveStart + rel) % 4294967296;
+    const hashTableStart = wrap(header.hashTableOffset);
+    if (hashTableStart > buf.length || header.hashTableEntries * 16 >= MAX_TABLE_BYTES) throw new MpqError("Corrupted", "Hash table extends beyond archive");
+    const hashFits = Math.min(header.hashTableEntries, Math.floor((buf.length - hashTableStart) / 16));
+    const hashTable = readHashTable(buf.subarray(hashTableStart, hashTableStart + hashFits * 16), hashFits);
+    if (hashFits < header.hashTableEntries) {
+      const empty = Object.freeze(blankHashEntry());
+      hashTable.length = header.hashTableEntries;
+      hashTable.fill(empty, hashFits);
+    }
+    const blockTableStart = wrap(header.blockTableOffset);
+    if (blockTableStart > buf.length || header.blockTableEntries * 16 >= MAX_TABLE_BYTES) throw new MpqError("Corrupted", "Block table extends beyond archive");
+    const blockFits = Math.min(header.blockTableEntries, Math.floor((buf.length - blockTableStart) / 16));
+    const blockTable = readBlockTable(buf.subarray(blockTableStart, blockTableStart + blockFits * 16), blockFits);
+    const tables2 = {
+      hash: {
+        start: hashTableStart,
+        entries: header.hashTableEntries,
+        read: hashFits
+      },
+      block: {
+        start: blockTableStart,
+        entries: header.blockTableEntries,
+        read: blockFits
+      }
+    };
+    return new Archive2(buf, archiveStart, header, sectorSize, hashTable, blockTable, tables2);
   }
   /**
   * Read a file from the archive by name.
@@ -2109,7 +2173,7 @@ var Archive = class Archive2 {
     const adjusted = isKeyAdjusted(blockEntry.flags);
     let encKey = null;
     if (encrypted) encKey = calculateFileKey(name, blockEntry.filePos, blockEntry.uncompressedSize, adjusted);
-    const fileDataStart = this.archiveStart + blockEntry.filePos;
+    const fileDataStart = this.offsetOf(blockEntry.filePos);
     if (!compressed) {
       const rawData = new Uint8Array(this.data.subarray(fileDataStart, fileDataStart + blockEntry.uncompressedSize));
       if (encrypted && encKey !== null) {
@@ -2182,7 +2246,7 @@ var Archive = class Archive2 {
     };
     if (!compressed || blockEntry.uncompressedSize === 0) return info;
     try {
-      const fileDataStart = this.archiveStart + blockEntry.filePos;
+      const fileDataStart = this.offsetOf(blockEntry.filePos);
       const sotBytes = (sectorCount(blockEntry.uncompressedSize, this.sectorSize) + 1) * 4;
       const sotData = new Uint8Array(this.data.subarray(fileDataStart, fileDataStart + sotBytes));
       const encKey = encrypted ? calculateFileKey(name, blockEntry.filePos, blockEntry.uncompressedSize, isKeyAdjusted(flags)) : null;
@@ -2220,8 +2284,8 @@ var Archive = class Archive2 {
   * Functionally identical to `open()` since parsing headers/tables is CPU-bound,
   * but provided for API consistency in async workflows.
   */
-  static async openAsync(data) {
-    return Archive2.open(data);
+  static async openAsync(data, options) {
+    return Archive2.open(data, options);
   }
   /**
   * Read a file from the archive by name (async).
@@ -2237,7 +2301,7 @@ var Archive = class Archive2 {
     const adjusted = isKeyAdjusted(blockEntry.flags);
     let encKey = null;
     if (encrypted) encKey = calculateFileKey(name, blockEntry.filePos, blockEntry.uncompressedSize, adjusted);
-    const fileDataStart = this.archiveStart + blockEntry.filePos;
+    const fileDataStart = this.offsetOf(blockEntry.filePos);
     if (!compressed) {
       const rawData = new Uint8Array(this.data.subarray(fileDataStart, fileDataStart + blockEntry.uncompressedSize));
       if (encrypted && encKey !== null) {
@@ -2325,11 +2389,11 @@ var Archive = class Archive2 {
     this.hashTable.forEach((hash, slot) => {
       if (isFreeHashEntry(hash)) return;
       const same2 = twins.get(`${hash.hashA}:${hash.hashB}`);
-      if (same2.length > 1 && this.choose(same2) !== slot) return;
+      if (same2.length > 1 && this.choose(this.probeOrder(same2)) !== slot) return;
       const block = this.blockTable[hash.blockIndex];
       if (!block || (block.flags & 2147483648) === 0) return;
       const start = this.archiveStart + block.filePos;
-      if (start > this.data.length || start === this.data.length && block.compressedSize > 0) return;
+      if (start >= 4294967296 || start > this.data.length || start === this.data.length && block.compressedSize > 0) return;
       const end = Math.min(start + block.compressedSize, this.data.length);
       out.push({
         slot,
@@ -2362,14 +2426,13 @@ var Archive = class Archive2 {
   readable(hash) {
     const block = this.blockTable[hash.blockIndex];
     if (!block || (block.flags & 2147483648) === 0) return false;
-    const start = this.archiveStart + block.filePos;
-    const stored = isCompressed(block.flags) || isImploded(block.flags) ? block.compressedSize : block.uncompressedSize;
-    return start >= this.archiveStart && start + stored <= this.data.length;
+    return this.offsetOf(block.filePos) + (isCompressed(block.flags) || isImploded(block.flags) ? block.compressedSize : block.uncompressedSize) <= this.data.length;
   }
   /**
   * Which of several slots for one name to read: a readable block over an unreadable
-  * one, a block with bytes over an empty one, the locale asked for, the neutral locale,
-  * then probe order.
+  * one, a block with bytes over an empty one, the locale asked for (the first in probe
+  * order), the neutral locale (the last in probe order, as storm takes it), then the
+  * first in probe order.
   */
   choose(slots, locale) {
     const readable = slots.filter((s) => this.readable(this.hashTable[s]));
@@ -2380,7 +2443,27 @@ var Archive = class Archive2 {
       const l = this.hashTable[s].locale;
       return locale !== void 0 && l === locale ? 0 : l === 0 ? 1 : 2;
     };
-    return pool.reduce((best, s) => rank(s) < rank(best) ? s : best, pool[0]);
+    return pool.reduce((best, s) => {
+      const r2 = rank(s), b = rank(best);
+      return r2 < b || r2 === 1 && b === 1 ? s : best;
+    }, pool[0]);
+  }
+  /**
+  * Slots of one name in the order a lookup meets them. The name is not known, so neither
+  * is its home slot; but a lookup runs from the home through occupied slots only, so all of
+  * them lie in one run of occupied slots, met from the run's first slot on. A table with no
+  * empty slot has no run's start to go by: table order.
+  */
+  probeOrder(slots) {
+    const n = this.hashTable.length;
+    let start = slots[0];
+    for (let i2 = 0; i2 < n; i2++) {
+      const prev = (start - 1 + n) % n;
+      if (this.hashTable[prev].blockIndex === 4294967295) break;
+      start = prev;
+      if (i2 === n - 1) start = 0;
+    }
+    return [...slots].sort((a2, b) => (a2 - start + n) % n - (b - start + n) % n);
   }
   /** A copy of the hash table as read — what `CreatorOptions.hashTable` takes to lay a new archive out over this one. */
   hashEntries() {
@@ -2390,13 +2473,18 @@ var Archive = class Archive2 {
   get start() {
     return this.archiveStart;
   }
-  /** Byte offset of the archive end in the input data */
+  /** Byte offset of the archive end in the input data: `start + size`. */
   get end() {
-    return this.archiveStart + this.header.archiveSize;
+    return this.archiveStart + this.size;
   }
-  /** Archive size as reported by the header */
+  /**
+  * Archive size as reported by the header — or, when the header says more than the data
+  * holds from the header on, what it holds. The game's storm never reads this field, and
+  * protectors and patchers write 0xFFFFFFFF there.
+  */
   get size() {
-    return this.header.archiveSize;
+    const held = this.data.length - this.archiveStart;
+    return this.header.archiveSize <= held ? this.header.archiveSize : held;
   }
   /** Get the raw underlying data buffer */
   get rawData() {
@@ -7355,9 +7443,9 @@ function applyTextEntry(file, schema, entry) {
         const flag = key.slice(name.length + 1);
         let bit = text.names.indexOf(flag);
         if (bit < 0 || !flag) {
-          const hex6 = /^flag_0x([0-9a-fA-F]+)$/.exec(flag);
-          const mask = hex6 ? parseInt(hex6[1], 16) : 0;
-          if (!hex6 || mask === 0 || (mask & mask - 1) !== 0) throw new DatTextError(`${name} has no flag ${flag}`, line);
+          const hex5 = /^flag_0x([0-9a-fA-F]+)$/.exec(flag);
+          const mask = hex5 ? parseInt(hex5[1], 16) : 0;
+          if (!hex5 || mask === 0 || (mask & mask - 1) !== 0) throw new DatTextError(`${name} has no flag ${flag}`, line);
           bit = Math.log2(mask);
         }
         if (value) v = (v | 2 ** bit) >>> 0;
@@ -9432,13 +9520,13 @@ var ISCRIPT_OPCODES = [
 var BY_NAME = /* @__PURE__ */ new Map();
 for (const o of ISCRIPT_OPCODES) BY_NAME.set(o.name, o);
 for (const o of ISCRIPT_OPCODES.filter((o2) => o2.name.startsWith("__"))) {
-  const hex6 = o.name.slice(2);
+  const hex5 = o.name.slice(2);
   for (const alias of [
-    `unused_${hex6}`,
-    `unknown_${hex6}`,
-    `unk_${hex6}`,
-    `unused${hex6}`,
-    `unknown${hex6}`
+    `unused_${hex5}`,
+    `unknown_${hex5}`,
+    `unk_${hex5}`,
+    `unused${hex5}`,
+    `unknown${hex5}`
   ]) BY_NAME.set(alias, o);
 }
 var ISCRIPT_ANIMS = [
@@ -9646,14 +9734,14 @@ var DEFAULT_PREAMBLE = [
 function iscriptToText(data, options = {}) {
   const { table, headers, end, rule } = readIscriptHeaders(data);
   if (end !== data.length) throw new Error(`iscript.bin: ${data.length - end} bytes after the id table's end`);
-  const headerAt = /* @__PURE__ */ new Map();
+  const headerAt2 = /* @__PURE__ */ new Map();
   for (const h2 of headers) {
-    if (headerAt.has(h2.offset)) throw new Error(`iscript ${h2.id} shares its header with ${headerAt.get(h2.offset).id}, which the text form cannot say`);
-    headerAt.set(h2.offset, h2);
+    if (headerAt2.has(h2.offset)) throw new Error(`iscript ${h2.id} shares its header with ${headerAt2.get(h2.offset).id}, which the text form cannot say`);
+    headerAt2.set(h2.offset, h2);
   }
   const headerEnd = (h2) => h2.offset + 8 + h2.anims.length * 2;
   const insideHeader = (at) => headers.some((h2) => at > h2.offset && at < headerEnd(h2));
-  for (const h2 of headers) for (const a2 of h2.anims) if (a2 && (a2 < 2 || a2 >= table || insideHeader(a2) || headerAt.has(a2))) throw new Error(`iscript ${h2.id}: an entry point at ${a2}, outside the code`);
+  for (const h2 of headers) for (const a2 of h2.anims) if (a2 && (a2 < 2 || a2 >= table || insideHeader(a2) || headerAt2.has(a2))) throw new Error(`iscript ${h2.id}: an entry point at ${a2}, outside the code`);
   const reached = /* @__PURE__ */ new Map();
   const targets = /* @__PURE__ */ new Set();
   const todo = [];
@@ -9663,7 +9751,7 @@ function iscriptToText(data, options = {}) {
   }
   while (todo.length) {
     let pc2 = todo.pop();
-    while (pc2 < table && !reached.has(pc2) && !headerAt.has(pc2)) {
+    while (pc2 < table && !reached.has(pc2) && !headerAt2.has(pc2)) {
       const ins = decodeAt(data, pc2, table);
       if (!ins || labelArgs(ins).some((t2) => t2 < 2 || t2 >= table || insideHeader(t2))) break;
       reached.set(pc2, ins);
@@ -9760,7 +9848,7 @@ function iscriptToText(data, options = {}) {
       writeHeader(h3);
     }
     if (pc >= limit) break;
-    const h2 = !iceLayout ? headerAt.get(pc) : void 0;
+    const h2 = !iceLayout ? headerAt2.get(pc) : void 0;
     if (h2) {
       flushRaw();
       writeHeader(h2);
@@ -10190,21 +10278,21 @@ function decodeGrpImage(data) {
         pixels: data.slice(offset, offset + fw * fh)
       };
     });
-    const image = {
+    const image2 = {
       width,
       height,
       frames,
       raw: true
     };
-    if (!sameBytes(encodeGrpImage(image), data)) {
+    if (!sameBytes(encodeGrpImage(image2), data)) {
       const first = /* @__PURE__ */ new Map();
-      image.shares = frames.map((_, i2) => {
+      image2.shares = frames.map((_, i2) => {
         const offset = view2.getUint32(6 + i2 * 8 + 4, true);
         if (!first.has(offset)) first.set(offset, i2);
         return first.get(offset);
       });
     }
-    return image;
+    return image2;
   }
 }
 function decodeRleFrames(data, view2, count) {
@@ -10311,21 +10399,21 @@ function encodeGrpFrame(frame) {
   out.set(lines, table);
   return out;
 }
-function encodeGrpImage(image) {
-  if (image.frames.length > 65535) throw new Error(`a GRP holds at most 65535 frames, not ${image.frames.length}`);
-  const header = 6 + image.frames.length * 8;
+function encodeGrpImage(image2) {
+  if (image2.frames.length > 65535) throw new Error(`a GRP holds at most 65535 frames, not ${image2.frames.length}`);
+  const header = 6 + image2.frames.length * 8;
   const chunks = [];
   const offsets = [];
   const written = [];
   const seen = /* @__PURE__ */ new Map();
   let at = header;
-  for (const [i2, frame] of image.frames.entries()) {
+  for (const [i2, frame] of image2.frames.entries()) {
     if (frame.width > 255 || frame.height > 255 || frame.x > 255 || frame.y > 255) throw new Error(`a GRP frame's box is at most 255 \xD7 255 at (\u2264255, \u2264255); this one is ${frame.width} \xD7 ${frame.height} at (${frame.x}, ${frame.y})`);
     if (frame.pixels.length !== frame.width * frame.height) throw new Error(`a ${frame.width} \xD7 ${frame.height} frame needs ${frame.width * frame.height} pixels, not ${frame.pixels.length}`);
-    const bytes = image.raw ? frame.pixels : encodeGrpFrame(frame);
+    const bytes = image2.raw ? frame.pixels : encodeGrpFrame(frame);
     written.push(bytes);
     const key = keyOf(bytes);
-    const hint = image.shares?.[i2];
+    const hint = image2.shares?.[i2];
     const again = hint === void 0 ? seen.get(key) : hint < i2 && (bytes.length === 0 || sameBytes(bytes, written[hint])) ? offsets[hint] : void 0;
     if (again !== void 0) {
       offsets.push(again);
@@ -10338,10 +10426,10 @@ function encodeGrpImage(image) {
   }
   const out = new Uint8Array(at);
   const view2 = new DataView(out.buffer);
-  view2.setUint16(0, image.frames.length, true);
-  view2.setUint16(2, image.width, true);
-  view2.setUint16(4, image.height, true);
-  image.frames.forEach((f, i2) => {
+  view2.setUint16(0, image2.frames.length, true);
+  view2.setUint16(2, image2.width, true);
+  view2.setUint16(4, image2.height, true);
+  image2.frames.forEach((f, i2) => {
     const h2 = 6 + i2 * 8;
     out[h2] = f.x;
     out[h2 + 1] = f.y;
@@ -10396,15 +10484,15 @@ function frameFromPicture(pixels, width, height) {
     pixels: out
   };
 }
-function framePicture(image, index) {
-  const f = image.frames[index];
-  const out = new Uint8Array(image.width * image.height);
+function framePicture(image2, index) {
+  const f = image2.frames[index];
+  const out = new Uint8Array(image2.width * image2.height);
   for (let y = 0; y < f.height; y++) {
     const ty = f.y + y;
-    if (ty >= image.height) break;
+    if (ty >= image2.height) break;
     for (let x3 = 0; x3 < f.width; x3++) {
       const tx = f.x + x3;
-      if (tx < image.width) out[ty * image.width + tx] = f.pixels[y * f.width + x3];
+      if (tx < image2.width) out[ty * image2.width + tx] = f.pixels[y * f.width + x3];
     }
   }
   return out;
@@ -11867,7 +11955,7 @@ function encodeArg(kind, text, line, expanded, names, blocks, base) {
     v >>> 16 & 255,
     v >>> 24 & 255
   ];
-  const byName2 = (list, what, keywords) => {
+  const byName3 = (list, what, keywords) => {
     const v = parseNumber(text);
     if (v !== null) return v;
     const t2 = text.replace(/^["']|["']$/g, "");
@@ -11920,20 +12008,20 @@ function encodeArg(kind, text, line, expanded, names, blocks, base) {
       ] : [0, 0];
     }
     case "unit":
-      return le16(byName2(names.units, "unit"));
+      return le16(byName3(names.units, "unit"));
     case "unit_id":
-      return le16(byName2(names.units, "unit", UNIT_KEYWORDS));
+      return le16(byName3(names.units, "unit", UNIT_KEYWORDS));
     case "upgrade":
-      return le16(byName2(names.upgrades, "upgrade"));
+      return le16(byName3(names.upgrades, "upgrade"));
     case "technology":
-      return le16(byName2(names.technologies, "technology"));
+      return le16(byName3(names.technologies, "technology"));
     case "unit_group": {
       const parts = text.split("|").map((s) => s.trim());
       const one = parts[parts.length - 1] === "Group_Of_One";
       const units = (one ? parts.slice(0, -1) : parts).map((p) => {
         const saved = text;
         text = p;
-        const v = byName2(names.units, "unit", UNIT_KEYWORDS);
+        const v = byName3(names.units, "unit", UNIT_KEYWORDS);
         text = saved;
         return v;
       });
@@ -12005,12 +12093,12 @@ function layOut(file, items, scripts, expanded, preamble, longJumpNote, labels, 
     for (const e of encoded) for (const b of e.blocks) if (!b.long && !tramp.includes(b.label)) throw new AiScriptTextError(`block ${b.label} is jumped to with a short argument but has no trampoline in the long-jumps note`, 0);
   }
   const codeStart = 4 + tramp.length * 5 + preamble.length;
-  const offsetOf = /* @__PURE__ */ new Map();
+  const offsetOf2 = /* @__PURE__ */ new Map();
   let at = codeStart;
   const itemAt = [];
   items.forEach((it, i2) => {
     itemAt.push(at);
-    if (it.kind === "label") offsetOf.set(it.name, at);
+    if (it.kind === "label") offsetOf2.set(it.name, at);
     at += encoded[i2].bytes.length;
   });
   const headersAt = at;
@@ -12021,7 +12109,7 @@ function layOut(file, items, scripts, expanded, preamble, longJumpNote, labels, 
   const view2 = new DataView(out.buffer);
   view2.setUint32(0, headersAt, true);
   const target = (label, line) => {
-    const o = offsetOf.get(label);
+    const o = offsetOf2.get(label);
     if (o === void 0) {
       const l = labels.get(label);
       throw new AiScriptTextError(l ? `block ${label} is in ${l.file}.bin; ${file}.bin cannot jump to it` : `no block ${label}`, line);
@@ -12569,12 +12657,12 @@ function latin1Bytes(s) {
     return v;
   });
 }
-async function encodePng(image) {
-  const { width, height } = image;
-  const indexed = !!image.indices;
-  if (indexed && !image.palette) throw new Error("a palette PNG needs its palette");
+async function encodePng(image2) {
+  const { width, height } = image2;
+  const indexed = !!image2.indices;
+  if (indexed && !image2.palette) throw new Error("a palette PNG needs its palette");
   const channels = indexed ? 1 : 4;
-  const pixels = indexed ? image.indices : image.rgba;
+  const pixels = indexed ? image2.indices : image2.rgba;
   if (!pixels || pixels.length !== width * height * channels) throw new Error(`a ${width} \xD7 ${height} PNG needs ${width * height * channels} values`);
   const stride = width * channels;
   const raw2 = new Uint8Array((stride + 1) * height);
@@ -12587,7 +12675,7 @@ async function encodePng(image) {
   ihdr[9] = indexed ? 3 : 6;
   chunks.push(["IHDR", ihdr]);
   if (indexed) {
-    const pal = image.palette;
+    const pal = image2.palette;
     const per = pal.length % 4 === 0 && pal.length / 4 <= 256 && pal.length !== 768 ? 4 : 3;
     const n = Math.min(256, pal.length / per);
     const plte = new Uint8Array(n * 3);
@@ -12601,7 +12689,7 @@ async function encodePng(image) {
     while (last > 0 && alpha[last - 1] === 255) last--;
     if (last) chunks.push(["tRNS", new Uint8Array(alpha.slice(0, last))]);
   }
-  for (const [k, v] of Object.entries(image.text ?? {})) chunks.push(["tEXt", new Uint8Array([
+  for (const [k, v] of Object.entries(image2.text ?? {})) chunks.push(["tEXt", new Uint8Array([
     ...latin1Bytes(k),
     0,
     ...latin1Bytes(v)
@@ -12762,7 +12850,7 @@ async function pngToGrp(png, palette, options = {}) {
     colour: `#${k.toString(16).padStart(6, "0")}`,
     ...v
   })).sort((a2, b) => b.pixels - a2.pixels);
-  const image = {
+  const image2 = {
     width: fw,
     height: fh,
     frames,
@@ -12770,8 +12858,8 @@ async function pngToGrp(png, palette, options = {}) {
     ...note?.raw && Array.isArray(note.shares) ? { shares: note.shares } : {}
   };
   return {
-    grp: encodeGrpImage(image),
-    image,
+    grp: encodeGrpImage(image2),
+    image: image2,
     report
   };
 }
@@ -12779,210 +12867,7 @@ function fits(pic, w, h2, [bx, by, bw, bh]) {
   for (let y = 0; y < h2; y++) for (let x3 = 0; x3 < w; x3++) if (pic[y * w + x3] && (x3 < bx || y < by || x3 >= bx + bw || y >= by + bh)) return false;
   return true;
 }
-var GAME_FOLDERS = [
-  "arr",
-  "rez",
-  "scripts",
-  "unit",
-  "tileset",
-  "sound",
-  "game",
-  "font",
-  "dlgs",
-  "glue",
-  "triggers",
-  "portrait",
-  "music",
-  "cursor",
-  "local",
-  "parallax",
-  "smk",
-  "maps",
-  "anim",
-  "hd2",
-  "sd",
-  "templates",
-  "staredit",
-  "campaign",
-  "datreq",
-  "samase",
-  "lua",
-  "config"
-];
 var gameName = (path) => path.replace(/\//g, "\\").replace(/^\\+/, "").toLowerCase();
-function modRoot(paths) {
-  const score = /* @__PURE__ */ new Map(), hasArr = /* @__PURE__ */ new Set();
-  for (const p of paths) {
-    const parts = p.split("/");
-    for (let i2 = 0; i2 < parts.length - 1; i2++) {
-      const folder = parts[i2].toLowerCase();
-      if (!GAME_FOLDERS.includes(folder) || folder === "maps") continue;
-      const root = parts.slice(0, i2).join("/");
-      score.set(root, (score.get(root) ?? 0) + 1);
-      if (folder === "arr") hasArr.add(root);
-    }
-  }
-  const best = (list) => list.sort((a2, b) => (score.get(b) ?? 0) - (score.get(a2) ?? 0) || a2.split("/").length - b.split("/").length)[0];
-  return best([...hasArr]) ?? best([...score.keys()]) ?? "";
-}
-var MPQ_MAGIC = 441536589;
-var MPQ_USER = 458313805;
-var PEGF = 1179075920;
-var view = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
-function mpqHeaderAt(b, at) {
-  if (at < 0 || at + 32 > b.length) return false;
-  const v = view(b);
-  if (v.getUint32(at, true) !== MPQ_MAGIC) return false;
-  const size = v.getUint32(at + 4, true), version = v.getUint16(at + 12, true);
-  return size >= 32 && size <= 208 && version <= 3;
-}
-function findMpq(b, from) {
-  for (let at = Math.max(0, from); at + 32 <= b.length; at++) if (b[at] === 77 && b[at + 1] === 80 && b[at + 2] === 81 && b[at + 3] === 26 && mpqHeaderAt(b, at)) return at;
-  return -1;
-}
-function programEnd(b) {
-  if (b.length < 64 || b[0] !== 77 || b[1] !== 90) return null;
-  const v = view(b), pe = v.getUint32(60, true);
-  if (pe + 24 > b.length || v.getUint32(pe, true) !== 17744) return null;
-  const sections = v.getUint16(pe + 6, true), optional = v.getUint16(pe + 20, true), table = pe + 24 + optional;
-  let end = table + sections * 40;
-  for (let i2 = 0; i2 < sections; i2++) {
-    const s = table + i2 * 40;
-    if (s + 40 > b.length) return null;
-    const raw2 = v.getUint32(s + 16, true), at = v.getUint32(s + 20, true);
-    if (raw2 && at + raw2 > end) end = at + raw2;
-  }
-  return Math.min(end, b.length);
-}
-function exeArchive(b) {
-  const end = programEnd(b);
-  if (end === null) return null;
-  const v = view(b);
-  for (let at = end; at + 24 <= b.length && at < end + 4096; at++) {
-    if (v.getUint32(at, true) !== PEGF) continue;
-    const count = v.getUint32(at + 8, true);
-    if (v.getUint32(at + 4, true) !== 1 || count === 0 || count > 64) continue;
-    const plugins = [];
-    let p = at + 12;
-    for (let i2 = 0; i2 < count && p + 12 <= b.length; i2++, p += 12) plugins.push({
-      id: v.getUint32(p, true),
-      size: v.getUint32(p + 4, true)
-    });
-    let mpq = p + plugins.reduce((n, x3) => n + x3.size, 0);
-    if (!mpqHeaderAt(b, mpq)) mpq = findMpq(b, p);
-    if (mpq < 0) return null;
-    return {
-      archive: b.subarray(mpq),
-      at: mpq,
-      kind: "firegraft",
-      plugins
-    };
-  }
-  for (let at = Math.ceil(end / 512) * 512; at + 32 <= b.length; at += 512) {
-    if (v.getUint32(at, true) === MPQ_USER && at + 12 <= b.length) {
-      const real = at + v.getUint32(at + 8, true);
-      if (mpqHeaderAt(b, real)) return {
-        archive: b.subarray(real),
-        at: real,
-        kind: "sempq",
-        plugins: []
-      };
-    }
-    if (mpqHeaderAt(b, at)) return {
-      archive: b.subarray(at),
-      at,
-      kind: "sempq",
-      plugins: []
-    };
-  }
-  const any = findMpq(b, end);
-  return any < 0 ? null : {
-    archive: b.subarray(any),
-    at: any,
-    kind: "sempq",
-    plugins: []
-  };
-}
-var isMpq = (b) => b.length >= 32 && (view(b).getUint32(0, true) === MPQ_MAGIC || view(b).getUint32(0, true) === MPQ_USER);
-var isZip = (b) => b.length >= 22 && b[0] === 80 && b[1] === 75 && (b[2] === 3 || b[2] === 5);
-var ModSourceError = class extends Error {
-};
-function readZip(b) {
-  const v = view(b);
-  let eocd = -1;
-  for (let at2 = b.length - 22; at2 >= Math.max(0, b.length - 22 - 65535); at2--) if (v.getUint32(at2, true) === 101010256) {
-    eocd = at2;
-    break;
-  }
-  if (eocd < 0) throw new ModSourceError("The zip's directory is not at its end: it may be cut short.");
-  const count = v.getUint16(eocd + 10, true), dirAt = v.getUint32(eocd + 16, true);
-  if (count === 65535 || dirAt === 4294967295) throw new ModSourceError("The zip is in the large-zip form (zip64), which is not read here: unzip it and name the folder.");
-  const out = [];
-  let at = dirAt;
-  for (let i2 = 0; i2 < count; i2++) {
-    if (at + 46 > b.length || v.getUint32(at, true) !== 33639248) throw new ModSourceError("The zip's directory is damaged.");
-    const flags = v.getUint16(at + 8, true), method = v.getUint16(at + 10, true);
-    const packed2 = v.getUint32(at + 20, true), size = v.getUint32(at + 24, true);
-    const nameLength = v.getUint16(at + 28, true), extra = v.getUint16(at + 30, true), comment = v.getUint16(at + 32, true);
-    const local = v.getUint32(at + 42, true);
-    const raw2 = b.subarray(at + 46, at + 46 + nameLength);
-    const path = (flags & 2048 ? new TextDecoder().decode(raw2) : String.fromCharCode(...raw2)).replace(/\\/g, "/");
-    at += 46 + nameLength + extra + comment;
-    if (path.endsWith("/")) continue;
-    if (flags & 1) throw new ModSourceError(`${path} is encrypted in the zip; encrypted zips are not read.`);
-    if (method !== 0 && method !== 8) throw new ModSourceError(`${path} is packed in a way not read here (method ${method}); only stored and deflated members are.`);
-    out.push({
-      path,
-      size,
-      read: async () => {
-        if (local + 30 > b.length || v.getUint32(local, true) !== 67324752) throw new ModSourceError(`${path}: its place in the zip is damaged.`);
-        const from = local + 30 + v.getUint16(local + 26, true) + v.getUint16(local + 28, true);
-        const data = b.subarray(from, from + packed2);
-        if (method === 0) return data.slice();
-        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-        const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
-        if (bytes.length !== size) throw new ModSourceError(`${path}: inflated to ${bytes.length} bytes, the zip says ${size}.`);
-        return bytes;
-      }
-    });
-  }
-  return out;
-}
-var hex3 = (b) => [...new Uint8Array(b)].map((x3) => x3.toString(16).padStart(2, "0")).join("");
-var sha256 = async (bytes) => hex3(await crypto.subtle.digest("SHA-256", bytes));
-var fileDigest = (bytes) => sha256(bytes);
-var isPluginFile = (name) => /\.(qdp|bwl)$/i.test(name);
-var isFiregraftProject = (name) => /\.fgp$/i.test(name);
-var leafOf$1 = (path) => path.split(/[\\/]/).pop();
-var pluginLine = (name, sha2563) => `plugins\\${leafOf$1(name).toLowerCase()}	${sha2563}`;
-var firegraftLine = (name, sha2563) => `${leafOf$1(name).toLowerCase()}	${sha2563}`;
-async function hashLines(lines) {
-  const name = (l) => l.slice(0, l.indexOf("	"));
-  const sorted = [...lines].sort((a2, b) => name(a2) < name(b) ? -1 : name(a2) > name(b) ? 1 : 0);
-  return (await fileDigest(new TextEncoder().encode(sorted.join("\n")))).slice(0, 16);
-}
-async function modHashOfDigests(input) {
-  const game = /* @__PURE__ */ new Map();
-  for (const f of input.files) game.set(gameName(f.name), f.sha256);
-  const once = (list, keep, line) => {
-    const seen = /* @__PURE__ */ new Set(), out = [];
-    for (const f of list) {
-      const key = leafOf$1(f.name).toLowerCase();
-      if (!keep(f.name) || seen.has(key)) continue;
-      seen.add(key);
-      out.push(line(f.name, f.sha256));
-    }
-    return out;
-  };
-  const lines = [...[...game].map(([name, sha]) => `${name}	${sha}`), ...once(input.firegraft ?? [], isFiregraftProject, firegraftLine)].sort();
-  const pluginLines = once(input.plugins ?? [], isPluginFile, pluginLine).sort();
-  return {
-    hash: await hashLines([...lines, ...pluginLines]),
-    withoutPlugins: await hashLines(lines),
-    lines,
-    pluginLines
-  };
-}
 var latin = new TextDecoder("windows-1252");
 var MOD_MANIFEST = "mod.json";
 var DEFAULT_PALETTE = "jungle";
@@ -13046,8 +12931,8 @@ var ModFolderError = class extends Error {
   }
 };
 function folderPath(member) {
-  const hex6 = (c2) => `%${c2.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
-  const escape = (part) => [...part].map((c2) => c2.charCodeAt(0) < 32 || /[<>:"|?*%]/.test(c2) ? hex6(c2) : c2).join("");
+  const hex5 = (c2) => `%${c2.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`;
+  const escape = (part) => [...part].map((c2) => c2.charCodeAt(0) < 32 || /[<>:"|?*%]/.test(c2) ? hex5(c2) : c2).join("");
   return member.replace(/\\/g, "/").replace(/^\/+/, "").split("/").map((part) => part === "." || part === ".." ? part.replace(/\./g, "%2E") : escape(part)).join("/");
 }
 function memberPath(path) {
@@ -13297,12 +13182,12 @@ async function renderMember(member, bytes, ctx = {}) {
         return checked(text, graftBytes(member, asRead(text)));
       }
       case "graphics": {
-        const image = decodeGrpImage(bytes);
-        if (!same$1(encodeGrpImage(image), bytes)) return asBytes("another encoder wrote it: the pictures are the same, the bytes are not");
+        const image2 = decodeGrpImage(bytes);
+        if (!same$1(encodeGrpImage(image2), bytes)) return asBytes("another encoder wrote it: the pictures are the same, the bytes are not");
         if (!ctx.palette) return asBytes("no palette to draw it with");
         const text = {};
         if (/^[\x20-\xff]*$/.test(member)) text["scmjs:path"] = member;
-        const png = await grpToPng(image, ctx.palette, { text });
+        const png = await grpToPng(image2, ctx.palette, { text });
         return same$1((await pngToGrp(png, await sheetPalette(png, () => ctx.palette ?? null))).grp, bytes) ? {
           form: "graphics",
           file: place.file,
@@ -13455,12 +13340,12 @@ function recordRendered(manifest, members, r2) {
   }
 }
 function tidyManifest(m) {
-  const byName2 = (list, key) => list.sort((a2, b) => key(a2) < key(b) ? -1 : key(a2) > key(b) ? 1 : 0);
+  const byName3 = (list, key) => list.sort((a2, b) => key(a2) < key(b) ? -1 : key(a2) > key(b) ? 1 : 0);
   const sortObject = (o) => Object.fromEntries(Object.entries(o).sort(([a2], [b]) => a2 < b ? -1 : a2 > b ? 1 : 0));
-  byName2(m.kept, (k) => k.why).forEach((k) => byName2(k.files, (f) => f));
-  byName2(m.plugins, (p) => p.file);
-  byName2(m.firegraft, (p) => p.file);
-  byName2(m.maps, (x3) => x3);
+  byName3(m.kept, (k) => k.why).forEach((k) => byName3(k.files, (f) => f));
+  byName3(m.plugins, (p) => p.file);
+  byName3(m.firegraft, (p) => p.file);
+  byName3(m.maps, (x3) => x3);
   m.members = sortObject(m.members);
   m.encodings = sortObject(m.encodings);
   m.tables = Object.fromEntries(Object.entries(m.tables).sort(([a2], [b]) => a2 < b ? -1 : 1));
@@ -13946,11 +13831,11 @@ async function checkMod(data, files) {
     why: `${layouts.get("expanded").join(", ")} in DatExtend's expanded layout, ${layouts.get("datex").join(", ")} in GPTP's .datex: each is read by another plugin`
   });
   if (units) {
-    const byName2 = /* @__PURE__ */ new Map();
+    const byName3 = /* @__PURE__ */ new Map();
     data.names.units.forEach((n, id) => {
-      if (n && !PLACEHOLDER.test(n)) byName2.set(n.toLowerCase(), [...byName2.get(n.toLowerCase()) ?? [], id]);
+      if (n && !PLACEHOLDER.test(n)) byName3.set(n.toLowerCase(), [...byName3.get(n.toLowerCase()) ?? [], id]);
     });
-    for (const ids of byName2.values()) {
+    for (const ids of byName3.values()) {
       if (ids.length < 2) continue;
       if (ids.some((id) => id >= DAT_SCHEMAS.units.entries || ownEntry(data, "units", id))) out.push({
         level: "warning",
@@ -14306,6 +14191,2750 @@ function same(a2, b) {
   return true;
 }
 
+// node_modules/@scm-js/mod/dist/src-XVVSLGtf.mjs
+var ERROR = ["error"];
+var REASON = ["reason"];
+var PROGRESS = ["progress"];
+var SAID = ["said"];
+var SAID_PROGRESS = ["said", "progress"];
+var LOADER = ["loader"];
+var NAMED = ["named"];
+var ENTRY = ["entry"];
+var WHY = ["why"];
+var DESCRIPTION = ["description"];
+var MOD_MESSAGES = {
+  "not-in-tree": {
+    text: "{path} is not among {name}'s files",
+    params: ["path", "name"],
+    in: ERROR
+  },
+  "tbl-too-short": {
+    text: "a string table of fewer than two bytes",
+    params: [],
+    in: ERROR
+  },
+  "tbl-offsets-past-end": {
+    text: "a string table whose offsets run past its end",
+    params: [],
+    in: ERROR
+  },
+  "tbl-string-past-end": {
+    text: "string {index} starts past the table's end",
+    params: ["index"],
+    in: ERROR
+  },
+  "overlay-form": {
+    text: "its patcher overlay (at byte {at}) is of form {form}; only form {known} is known",
+    params: [
+      "at",
+      "form",
+      "known"
+    ],
+    in: REASON
+  },
+  "overlay-count": {
+    text: "its patcher overlay (at byte {at}) says it holds {count} plugins, which is no number a patcher writes",
+    params: ["at", "count"],
+    in: REASON
+  },
+  "overlay-cut": {
+    text: "its patcher overlay says it holds {count} plugins, and the file ends after {read}",
+    params: ["count", "read"],
+    in: REASON
+  },
+  "overlay-word": {
+    text: "plugin {n} of its patcher overlay (at byte {at}) has {value} where every patcher seen has 0: a form this reader does not know",
+    params: [
+      "n",
+      "at",
+      "value"
+    ],
+    in: REASON
+  },
+  "overlay-plugin-cut": {
+    text: "plugin {n} of its patcher overlay is {size} bytes, and the file ends {left} bytes after its start",
+    params: [
+      "n",
+      "size",
+      "left"
+    ],
+    in: REASON
+  },
+  "overlay-plugin-not-library": {
+    text: "plugin {n} of its patcher overlay (at byte {at}) is no Windows library",
+    params: ["n", "at"],
+    in: REASON
+  },
+  "efs-entry-cut": {
+    text: "entry {n} of its MPQDraft file system (at byte {at}) runs past the file's end",
+    params: ["n", "at"],
+    in: REASON
+  },
+  "patcher-no-archive": {
+    text: "it is FireGraft's patcher with {plugins, plural, one {# plugin} other {# plugins}}, and no archive was found after {plugins, plural, =0 {its overlay} other {them}}",
+    params: ["plugins"],
+    in: REASON
+  },
+  "sempq-no-archive": {
+    text: "it is MPQDraft's self-executing form with {files, plural, one {# embedded file} other {# embedded files}}, and no archive was found after them",
+    params: ["files"],
+    in: REASON
+  },
+  "zip-cut": {
+    text: "This zip's directory is not at its end: it may be cut short.",
+    params: [],
+    in: REASON
+  },
+  "zip64": {
+    text: "This zip is in the large-zip form (zip64), which this reader does not read: unzip it and give the folder instead.",
+    params: [],
+    in: REASON
+  },
+  "zip-damaged": {
+    text: "This zip's directory is damaged.",
+    params: [],
+    in: REASON
+  },
+  "zip-encrypted": {
+    text: "{path} is encrypted in this zip, and encrypted zips are not read.",
+    params: ["path"],
+    in: REASON
+  },
+  "zip-method": {
+    text: "{path} is packed in a way this reader does not read (method {method}): only stored and deflated members are read.",
+    params: ["path", "method"],
+    in: REASON
+  },
+  "zip-member-damaged": {
+    text: "{path}: its place in the zip is damaged.",
+    params: ["path"],
+    in: REASON
+  },
+  "zip-member-size": {
+    text: "{path}: inflated to {got} bytes, where the zip says {size}.",
+    params: [
+      "path",
+      "got",
+      "size"
+    ],
+    in: REASON
+  },
+  "zip-member-inflate": {
+    text: "{path}: its packed bytes could not be inflated ({detail}).",
+    params: ["path", "detail"],
+    in: REASON
+  },
+  "mpq-no-header": {
+    text: "no archive header is where it should be ({detail})",
+    params: ["detail"],
+    in: REASON
+  },
+  "mpq-version": {
+    text: "its format version is one this reader does not read ({detail})",
+    params: ["detail"],
+    in: REASON
+  },
+  "mpq-damaged": {
+    text: "it is damaged ({detail})",
+    params: ["detail"],
+    in: REASON
+  },
+  "mpq-compression": {
+    text: "a file in it is packed in a way this reader does not read ({detail})",
+    params: ["detail"],
+    in: REASON
+  },
+  "mpq-io": {
+    text: "it could not be read ({detail})",
+    params: ["detail"],
+    in: REASON
+  },
+  "mpq-file-missing": {
+    text: "a file it needs is not in it ({detail})",
+    params: ["detail"],
+    in: REASON
+  },
+  "mpq-other": {
+    text: "{detail}",
+    params: ["detail"],
+    in: REASON
+  },
+  "archive-unopenable": {
+    text: "{path} could not be opened as an archive: {why}",
+    params: [
+      "path",
+      "why",
+      "reason"
+    ],
+    in: ERROR,
+    hidden: ["reason"]
+  },
+  "exe-unreadable": {
+    text: "{path} cannot be read as a mod: {why}.",
+    params: ["path", "why"],
+    in: ERROR
+  },
+  "exe-no-archive": {
+    text: "{path} holds no archive: it is a program only, not a mod's patcher or self-executing archive",
+    params: ["path"],
+    in: ERROR
+  },
+  "exe-archive-unopenable": {
+    text: "the archive inside {path} (at byte {at}) could not be opened: {why}",
+    params: [
+      "path",
+      "at",
+      "why",
+      "reason"
+    ],
+    in: ERROR,
+    hidden: ["reason"]
+  },
+  "zip-unreadable": {
+    text: "{path} cannot be read as a zip: {why}",
+    params: ["path", "why"],
+    in: ERROR
+  },
+  "file-unreadable": {
+    text: "{path} could not be read: {why}",
+    params: ["path", "why"],
+    in: ERROR
+  },
+  "module-no-source": {
+    text: "{name} has no source to read it from",
+    params: ["name"],
+    in: ERROR
+  },
+  "module-in-archive": {
+    text: "{name} is inside an archive ({archive}): no loader loads it from there",
+    params: ["name", "archive"],
+    in: ERROR
+  },
+  "firegraft-archive-missing": {
+    text: "{name}: its archive {archive} is not among the mod's",
+    params: ["name", "archive"],
+    in: ERROR
+  },
+  "firegraft-unreadable": {
+    text: "{name} could not be read from {path}",
+    params: ["name", "path"],
+    in: ERROR
+  },
+  "opening": {
+    text: "Opening {path}\u2026",
+    params: ["path"],
+    in: PROGRESS
+  },
+  "probing": {
+    text: "{path} has no list of its files; looking for the game's own names in it\u2026",
+    params: ["path"],
+    in: PROGRESS
+  },
+  "reading-files": {
+    text: "Reading the mod's files: {done} of {total}\u2026",
+    params: ["done", "total"],
+    in: PROGRESS
+  },
+  "game-copy": {
+    text: "{folder} is a copy of the game. Its own archives ({list}{more, plural, =0 {} other { and # more}}) are not part of the mod and were left out.",
+    params: [
+      "folder",
+      "list",
+      "more"
+    ],
+    in: SAID_PROGRESS
+  },
+  "copy-only": {
+    text: "{folder} is a copy of the game, and there is no mod in it.",
+    params: ["folder"],
+    in: SAID
+  },
+  "packing-laid-instead": {
+    text: "{path} is {loader}'s own packing of its folder of files (it names it): the folder is laid in its place, at {priority}.",
+    params: [
+      "path",
+      "loader",
+      "priority"
+    ],
+    in: SAID
+  },
+  "json-unreadable": {
+    text: "{path} is not JSON that can be read: left out.",
+    params: ["path"],
+    in: SAID
+  },
+  "text-folder": {
+    text: "{path} says this is a mod folder in text form (format {format}): its texts and pictures are packed into the game's files before it can be read as a mod.",
+    params: ["path", "format"],
+    in: SAID
+  },
+  "unheld": {
+    text: "Left out, listed but not held by its archive or not readable: {list}{more, plural, =0 {} other { and # more}}.",
+    params: ["list", "more"],
+    in: SAID
+  },
+  "duplicate": {
+    text: "{name} is given more than once, in another case ({paths}): the last is used.",
+    params: ["name", "paths"],
+    in: SAID
+  },
+  "no-game-files": {
+    text: "There are no game files in {name}.",
+    params: ["name"],
+    in: SAID
+  },
+  "loader-firegraft": {
+    text: "FireGraft's patcher, with {plugins, plural, one {# plugin} other {# plugins}} in its overlay and its archive",
+    params: ["plugins"],
+    in: LOADER
+  },
+  "loader-sempq": {
+    text: "MPQDraft's self-executing MPQ, with {files, plural, one {# embedded file} other {# embedded files}} and its archive",
+    params: ["files"],
+    in: LOADER
+  },
+  "loader-self-executing": {
+    text: "a program with an archive after it, in neither patcher's form: read as that archive",
+    params: [],
+    in: LOADER
+  },
+  "loader-replacement": {
+    text: "an archive in place of the game's own {name}: the game opens it itself",
+    params: ["name"],
+    in: LOADER
+  },
+  "loader-mpqdraft": {
+    text: "an archive, as MPQDraft's patcher lays one",
+    params: [],
+    in: LOADER
+  },
+  "loader-packing": {
+    text: "{loader}'s own packing of its folder of files, which it opens at {priority}{laid, select, yes {: the folder is laid in its place} other {}}",
+    params: [
+      "loader",
+      "priority",
+      "laid"
+    ],
+    in: LOADER
+  },
+  "loader-plugin-loader": {
+    text: "a plugin that loads plugins: its folder's plugins by name (not those starting with _), its folder of files laid at {priority}",
+    params: ["priority"],
+    in: LOADER
+  },
+  "loader-folder": {
+    text: "files in the game's paths and plugins beside them, which no loader on Windows takes: the mod needs its files laid over the game's and its plugins loaded by name",
+    params: [],
+    in: LOADER
+  },
+  "patcher-plugin": {
+    text: "{exe} ({form, select, mpqdraft-sempq {MPQDraft SEMPQ} other {FireGraft patcher}} plugin {named, select, yes {{name}, } other {}}id {id})",
+    params: [
+      "exe",
+      "form",
+      "named",
+      "name",
+      "id"
+    ],
+    in: NAMED
+  },
+  "entry-mpqdraft": {
+    text: "MPQDraft's interface (GetMPQDraftPlugin, InitializePlugin)",
+    params: [],
+    in: ENTRY
+  },
+  "entry-bwl": {
+    text: "Chaoslauncher's (GetPluginAPI, ApplyPatchSuspended)",
+    params: [],
+    in: ENTRY
+  },
+  "entry-snp": {
+    text: "a storm network provider's (SnpBind)",
+    params: [],
+    in: ENTRY
+  },
+  "entry-dllmain": {
+    text: "DllMain alone",
+    params: [],
+    in: ENTRY
+  },
+  "entry-none": {
+    text: "none: not a Windows image",
+    params: [],
+    in: ENTRY
+  },
+  "why-plugin-loader": {
+    text: "it loads the mod's other plugins: the mod needs those plugins loaded in its order, not this plugin itself",
+    params: [],
+    in: WHY
+  },
+  "why-underscore": {
+    text: "its loader leaves out a name that starts with _",
+    params: [],
+    in: WHY
+  },
+  "why-qdp-only": {
+    text: "its loader loads .qdp files only",
+    params: [],
+    in: WHY
+  },
+  "why-no-entry": {
+    text: "it has no GetMPQDraftPlugin, which its loader asks for",
+    params: [],
+    in: WHY
+  },
+  "why-off": {
+    text: "turned off",
+    params: [],
+    in: WHY
+  },
+  "why-mpqdraft-patcher": {
+    text: "MPQDraft's own patcher, which its stub loads to lay the archive and load the plugins: the mod needs what it does, not the DLL itself",
+    params: [],
+    in: WHY
+  },
+  "why-same-plugin": {
+    text: "the same plugin as {name}, which is that file",
+    params: ["name"],
+    in: WHY
+  },
+  "why-library": {
+    text: "a library: mapped when a module imports it or asks for it",
+    params: [],
+    in: WHY
+  },
+  "why-provider": {
+    text: "a storm network provider: storm loads it only when a game between people chooses its mode, not when the mod starts",
+    params: [],
+    in: WHY
+  },
+  "why-plugin-data": {
+    text: "a file of plugin {id}'s, handed to it by MPQDraft's server (GetPluginModule)",
+    params: ["id"],
+    in: WHY
+  },
+  "why-plugin-in-archive": {
+    text: "a plugin inside an archive: no loader loads one from there",
+    params: [],
+    in: WHY
+  },
+  "describe-name": {
+    text: "{name}{link, select, none {} other { <{link}>}}{races, select, none {} other {; races {races}}}",
+    params: [
+      "name",
+      "link",
+      "races"
+    ],
+    in: DESCRIPTION
+  },
+  "describe-loaders": {
+    text: "loaders (outermost first):",
+    params: [],
+    in: DESCRIPTION
+  },
+  "describe-loader": {
+    text: "  {kind}  {top, select, yes {(the top)} other {{path}}}: {words}",
+    params: [
+      "kind",
+      "top",
+      "path",
+      "words"
+    ],
+    in: DESCRIPTION
+  },
+  "describe-layers": {
+    text: "layers (by storm's priority, lowest first: laid in this order, the later winning):",
+    params: [],
+    in: DESCRIPTION
+  },
+  "describe-layer": {
+    text: "  {n}. {kind} {top, select, yes {(the top)} other {{path}}}{at, select, none {} other { at byte {at}}}  priority {priority} by {by}{replaces, select, none {} other {, in place of the game's {replaces}}}: {files, plural, one {# file} other {# files}}{probed, select, yes { (no list: found by name)} other {}}",
+    params: [
+      "n",
+      "kind",
+      "top",
+      "path",
+      "at",
+      "priority",
+      "by",
+      "replaces",
+      "files",
+      "probed"
+    ],
+    in: DESCRIPTION
+  },
+  "describe-files": {
+    text: "  the game files after laying: {files}",
+    params: ["files"],
+    in: DESCRIPTION
+  },
+  "describe-modules": {
+    text: "modules (the loader's order):",
+    params: [],
+    in: DESCRIPTION
+  },
+  "describe-module": {
+    text: "  {order} {name}  {role}, entered by {entry}{samase, select, yes {; samase too} other {}}{id, select, none {} other {, id {id}}}; from {from}; {size} bytes{loaded, select, yes {} other {; not loaded: {why}}}",
+    params: [
+      "order",
+      "name",
+      "role",
+      "entry",
+      "samase",
+      "id",
+      "from",
+      "size",
+      "loaded",
+      "why"
+    ],
+    in: DESCRIPTION
+  },
+  "describe-patches": {
+    text: "patches:",
+    params: [],
+    in: DESCRIPTION
+  },
+  "describe-patch": {
+    text: "  FireGraft project {project} (from {top, select, yes {the top} other {{place}}}){database, select, none {, no database} other { with database {database}}}; lands at the game's first open of {moment} (a game's start, after the plugins' inits)",
+    params: [
+      "project",
+      "top",
+      "place",
+      "database",
+      "moment"
+    ],
+    in: DESCRIPTION
+  },
+  "describe-carried": {
+    text: "carried:",
+    params: [],
+    in: DESCRIPTION
+  },
+  "describe-carried-file": {
+    text: "  {name}: {why}",
+    params: ["name", "why"],
+    in: DESCRIPTION
+  },
+  "describe-none": {
+    text: "  none",
+    params: [],
+    in: DESCRIPTION
+  },
+  "describe-identity": {
+    text: "identity: hash {hash}, without plugins {withoutPlugins}; {lines} lines and {plugins} plugin lines{older, select, none {} other {; older {older}}}{beforeCode, select, none {} other {; before its code had lines {beforeCode}}}{declared, select, none {} other {; mod.json says {declared}}}; code {code, select, yes {yes} other {no}}; startup data read again {startup, select, yes {yes} other {no}}",
+    params: [
+      "hash",
+      "withoutPlugins",
+      "lines",
+      "plugins",
+      "older",
+      "beforeCode",
+      "declared",
+      "code",
+      "startup"
+    ],
+    in: DESCRIPTION
+  },
+  "describe-said": {
+    text: "said: {said}",
+    params: ["said"],
+    in: DESCRIPTION
+  }
+};
+function say(key, params) {
+  const message = {
+    key,
+    params,
+    template: MOD_MESSAGES[key].text,
+    text: ""
+  };
+  message.text = renderMessage(message);
+  return message;
+}
+function renderMessage(message, translate2) {
+  const flat = {};
+  for (const [name, value] of Object.entries(message.params)) flat[name] = typeof value === "object" ? renderMessage(value, translate2) : value;
+  return translate2 ? translate2(message.template, flat, message) : formatMessage(message.template, flat);
+}
+function formatMessage(template, params) {
+  let out = "", i2 = 0;
+  while (i2 < template.length) {
+    const open = template.indexOf("{", i2);
+    if (open < 0) {
+      out += template.slice(i2);
+      break;
+    }
+    const close = matchBrace(template, open);
+    if (close < 0) {
+      out += template.slice(i2);
+      break;
+    }
+    out += template.slice(i2, open) + placeholder(template.slice(open + 1, close), params);
+    i2 = close + 1;
+  }
+  return out;
+}
+function matchBrace(s, open) {
+  let depth = 0;
+  for (let i2 = open; i2 < s.length; i2++) if (s[i2] === "{") depth++;
+  else if (s[i2] === "}" && --depth === 0) return i2;
+  return -1;
+}
+function placeholder(inner, params) {
+  const comma = inner.indexOf(",");
+  if (comma < 0) {
+    const v = params[inner.trim()];
+    return v === void 0 ? `{${inner}}` : String(v);
+  }
+  const name = inner.slice(0, comma).trim(), rest = inner.slice(comma + 1), comma2 = rest.indexOf(",");
+  const value = params[name];
+  if (comma2 < 0 || value === void 0) return `{${inner}}`;
+  const kind = rest.slice(0, comma2).trim(), branches = branchesOf(rest.slice(comma2 + 1));
+  if (kind === "plural" && typeof value === "number") {
+    const branch = branches.get(`=${value}`) ?? branches.get(value === 1 ? "one" : "other") ?? branches.get("other");
+    return branch === void 0 ? `{${inner}}` : formatMessage(branch.replace(/#/g, value.toLocaleString("en-US")), params);
+  }
+  if (kind === "select") {
+    const branch = branches.get(String(value)) ?? branches.get("other");
+    return branch === void 0 ? `{${inner}}` : formatMessage(branch, params);
+  }
+  return `{${inner}}`;
+}
+function branchesOf(options) {
+  const out = /* @__PURE__ */ new Map();
+  let i2 = 0;
+  while (i2 < options.length) {
+    const open = options.indexOf("{", i2);
+    if (open < 0) break;
+    const close = matchBrace(options, open);
+    if (close < 0) break;
+    const key = options.slice(i2, open).trim();
+    if (key) out.set(key, options.slice(open + 1, close));
+    i2 = close + 1;
+  }
+  return out;
+}
+var ModError = class extends Error {
+  /** The message as data: its key and parameters, for a caller that translates or decides by it. */
+  detail;
+  /** `options.cause`: the error underneath, where there is one (the archive library's, whose `kind` the reason's key says). */
+  constructor(detail, options) {
+    super(detail.text, options);
+    this.name = new.target.name;
+    this.detail = detail;
+  }
+  get key() {
+    return this.detail.key;
+  }
+};
+var ModReadError = class extends ModError {
+};
+var SYSTEM_FILES = {
+  /** File names, lower case. */
+  names: [
+    "desktop.ini",
+    "thumbs.db",
+    "ehthumbs.db",
+    "ehthumbs_vista.db",
+    ".ds_store",
+    "icon\r",
+    ".directory"
+  ],
+  /** What a file name starts with. */
+  prefixes: ["._"],
+  /** Folder names, lower case: everything under one. */
+  folders: ["__macosx"]
+};
+function isSystemFile(path) {
+  const parts = path.toLowerCase().split(/[\\/]/).filter(Boolean);
+  const leaf2 = parts.pop() ?? "";
+  return SYSTEM_FILES.names.includes(leaf2) || SYSTEM_FILES.prefixes.some((p) => leaf2.startsWith(p)) || parts.some((folder) => SYSTEM_FILES.folders.includes(folder));
+}
+function inDotFolder(path) {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  parts.pop();
+  return parts.some((p) => p.startsWith(".") && p !== "." && p !== "..");
+}
+var leafOf2 = (path) => path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+var folderOf = (path) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+var view$2 = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+function peAt(b) {
+  if (b.length < 64 || b[0] !== 77 || b[1] !== 90) return null;
+  const pe = view$2(b).getUint32(60, true);
+  return pe + 24 <= b.length && view$2(b).getUint32(pe, true) === 17744 ? pe : null;
+}
+function programEnd(b) {
+  const pe = peAt(b);
+  if (pe === null) return null;
+  const v = view$2(b);
+  const sections = v.getUint16(pe + 6, true), optional = v.getUint16(pe + 20, true), table = pe + 24 + optional;
+  let end = table + sections * 40;
+  for (let i2 = 0; i2 < sections; i2++) {
+    const s = table + i2 * 40;
+    if (s + 40 > b.length) return null;
+    const raw2 = v.getUint32(s + 16, true), at = v.getUint32(s + 20, true);
+    if (raw2 && at + raw2 > end) end = at + raw2;
+  }
+  return Math.min(end, b.length);
+}
+function image(b) {
+  const pe = peAt(b);
+  if (pe === null) return null;
+  const v = view$2(b), optional = pe + 24, magic = v.getUint16(optional, true);
+  if (optional + (magic === 523 ? 112 : 96) > b.length) return null;
+  return {
+    v,
+    b,
+    dirs: optional + (magic === 523 ? 112 : 96),
+    dirCount: v.getUint32(optional + (magic === 523 ? 108 : 92), true),
+    table: optional + v.getUint16(pe + 20, true),
+    sections: v.getUint16(pe + 6, true)
+  };
+}
+function offsetOf(im, rva) {
+  for (let i2 = 0; i2 < im.sections; i2++) {
+    const s = im.table + i2 * 40;
+    if (s + 40 > im.b.length) return null;
+    const va = im.v.getUint32(s + 12, true), raw2 = im.v.getUint32(s + 16, true), at = im.v.getUint32(s + 20, true);
+    if (rva >= va && rva < va + raw2) return at + rva - va;
+  }
+  return null;
+}
+function cString(b, at, max2 = 260) {
+  if (at === null || at >= b.length) return null;
+  let end = at;
+  while (end < b.length && end - at < max2 && b[end] !== 0) end++;
+  const text = String.fromCharCode(...b.subarray(at, end));
+  return /^[\x20-\x7e]+$/.test(text) ? text : null;
+}
+function directory(im, k) {
+  if (im.dirCount <= k) return null;
+  const rva = im.v.getUint32(im.dirs + 8 * k, true), size = im.v.getUint32(im.dirs + 8 * k + 4, true);
+  const at = rva ? offsetOf(im, rva) : null;
+  return at === null ? null : {
+    at,
+    rva,
+    size
+  };
+}
+function exportsOf(b) {
+  try {
+    const im = image(b);
+    if (!im) return null;
+    const dir = directory(im, 0);
+    if (!dir || dir.at + 40 > b.length) return {
+      self: null,
+      names: [],
+      spans: []
+    };
+    const v = im.v, selfAt = offsetOf(im, v.getUint32(dir.at + 12, true));
+    const self = cString(b, selfAt);
+    const count = Math.min(v.getUint32(dir.at + 24, true), 65536), namesAt = offsetOf(im, v.getUint32(dir.at + 32, true));
+    const names = [], spans = [];
+    if (self && selfAt !== null) spans.push([selfAt, selfAt + self.length]);
+    for (let k = 0; namesAt !== null && k < count && namesAt + 4 * k + 4 <= b.length; k++) {
+      const at = offsetOf(im, v.getUint32(namesAt + 4 * k, true)), name = cString(b, at, 512);
+      if (name && at !== null) {
+        names.push(name);
+        spans.push([at, at + name.length]);
+      }
+    }
+    return {
+      self,
+      names,
+      spans
+    };
+  } catch {
+    return null;
+  }
+}
+var libraryName = (b) => exportsOf(b)?.self ?? null;
+function importsOf(b) {
+  try {
+    const im = image(b);
+    if (!im) return [];
+    const dir = directory(im, 1);
+    if (!dir) return [];
+    const v = im.v, out = [];
+    for (let d = dir.at; d + 20 <= b.length && out.length < 512; d += 20) {
+      const lookup = v.getUint32(d, true), nameRva = v.getUint32(d + 12, true), thunks = v.getUint32(d + 16, true);
+      if (!nameRva && !thunks) break;
+      const dll = cString(b, offsetOf(im, nameRva));
+      if (!dll) continue;
+      const names = [];
+      let t2 = offsetOf(im, lookup || thunks);
+      for (let k = 0; t2 !== null && t2 + 4 <= b.length && k < 8192; k++, t2 += 4) {
+        const e = v.getUint32(t2, true);
+        if (!e) break;
+        if (e & 2147483648) names.push(`#${e & 65535}`);
+        else {
+          const n = cString(b, (offsetOf(im, e) ?? -3) + 2, 512);
+          if (n) names.push(n);
+        }
+      }
+      out.push({
+        dll,
+        names
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+function holdsString(b, text, except = []) {
+  const t2 = [...text].map((c2) => c2.charCodeAt(0));
+  for (let at = b.indexOf(t2[0], 1); at >= 1 && at + t2.length < b.length; at = b.indexOf(t2[0], at + 1)) {
+    if (b[at - 1] !== 0 || b[at + t2.length] !== 0) continue;
+    let k = 1;
+    while (k < t2.length && b[at + k] === t2[k]) k++;
+    if (k === t2.length && !except.some(([lo, hi]) => at >= lo && at < hi)) return true;
+  }
+  return false;
+}
+var MPQ_MAGIC = 441536589;
+var MPQ_USER = 458313805;
+var PEGF = 1179075920;
+var OVERLAY_AT = 24;
+var OVERLAY_FORM = 1;
+var EFS = 542328389;
+var EFS_VERSION = 1;
+var view$1 = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+function mpqHeaderAt(b, at) {
+  if (at < 0 || at + 32 > b.length) return false;
+  const v = view$1(b);
+  if (v.getUint32(at, true) !== MPQ_MAGIC) return false;
+  const size = v.getUint32(at + 4, true), version = v.getUint16(at + 12, true);
+  if (version === 0) return (at + v.getUint32(at + 16, true)) % 4294967296 < b.length && (at + v.getUint32(at + 20, true)) % 4294967296 < b.length;
+  return size >= 32 && size <= 208 && version <= 3;
+}
+var PatcherError = class extends ModError {
+};
+function patcherOverlay(b, end) {
+  const v = view$1(b);
+  let at = -1;
+  const said = v.getUint32(OVERLAY_AT, true);
+  if (said >= end && said + 12 <= b.length && v.getUint32(said, true) === PEGF) at = said;
+  else for (let p2 = end; p2 + 12 <= b.length && p2 < end + 4096; p2++) if (v.getUint32(p2, true) === PEGF) {
+    at = p2;
+    break;
+  }
+  if (at < 0) return null;
+  const count = v.getUint32(at + 4, true), form = v.getUint32(at + 8, true);
+  if (form !== OVERLAY_FORM) throw new PatcherError(say("overlay-form", {
+    at,
+    form,
+    known: OVERLAY_FORM
+  }));
+  if (count > 256) throw new PatcherError(say("overlay-count", {
+    at,
+    count
+  }));
+  const plugins = [];
+  let p = at + 12;
+  for (let i2 = 0; i2 < count; i2++) {
+    if (p + 12 > b.length) throw new PatcherError(say("overlay-cut", {
+      count,
+      read: i2
+    }));
+    const id = v.getUint32(p, true), size = v.getUint32(p + 4, true), zero = v.getUint32(p + 8, true);
+    const from = p + 12;
+    if (zero !== 0) throw new PatcherError(say("overlay-word", {
+      n: i2 + 1,
+      at: p,
+      value: zero
+    }));
+    if (from + size > b.length) throw new PatcherError(say("overlay-plugin-cut", {
+      n: i2 + 1,
+      size,
+      left: b.length - from
+    }));
+    const bytes = b.subarray(from, from + size);
+    if (size < 2 || bytes[0] !== 77 || bytes[1] !== 90) throw new PatcherError(say("overlay-plugin-not-library", {
+      n: i2 + 1,
+      at: from
+    }));
+    plugins.push({
+      id,
+      file: null,
+      execute: true,
+      at: from,
+      size,
+      name: libraryName(bytes),
+      bytes
+    });
+    p = from + size;
+  }
+  return {
+    plugins,
+    after: p
+  };
+}
+function efsAt(b, end) {
+  const v = view$1(b);
+  for (let at = Math.ceil(end / 512) * 512; at + 32 <= b.length; at += 512) {
+    if (v.getUint32(at, true) !== EFS || v.getUint32(at + 4, true) !== EFS_VERSION) continue;
+    const size = v.getUint32(at + 8, true), dir = v.getUint32(at + 12, true), count = v.getUint32(at + 16, true);
+    if (at + size > b.length || at + dir + count * 24 > b.length || count > 4096) continue;
+    const entries = [];
+    for (let k = 0; k < count; k++) {
+      const e = at + dir + k * 24;
+      const id = v.getUint32(e, true), file = v.getUint32(e + 4, true), execute = v.getUint32(e + 8, true) !== 0, off = v.getUint32(e + 12, true), n = v.getUint32(e + 16, true);
+      if (at + off + n > b.length) throw new PatcherError(say("efs-entry-cut", {
+        n: k + 1,
+        at
+      }));
+      const bytes = b.subarray(at + off, at + off + n);
+      entries.push({
+        id,
+        file,
+        execute,
+        at: at + off,
+        size: n,
+        name: bytes[0] === 77 && bytes[1] === 90 ? libraryName(bytes) : null,
+        bytes
+      });
+    }
+    return {
+      entries,
+      after: at + size
+    };
+  }
+  return null;
+}
+function find(b, from) {
+  for (let at = from; at + 32 <= b.length; at++) if (b[at] === 77 && b[at + 1] === 80 && b[at + 2] === 81 && b[at + 3] === 26 && mpqHeaderAt(b, at)) return at;
+  return -1;
+}
+function archiveAfter(b, from) {
+  const v = view$1(b);
+  for (let at = Math.ceil(from / 512) * 512; at + 32 <= b.length; at += 512) {
+    if (v.getUint32(at, true) === MPQ_USER && at + 12 <= b.length) {
+      const real = at + v.getUint32(at + 8, true);
+      if (mpqHeaderAt(b, real)) return real;
+    }
+    if (mpqHeaderAt(b, at)) return at;
+  }
+  return find(b, from);
+}
+function exeArchive(b) {
+  const end = programEnd(b);
+  if (end === null) return null;
+  const overlay = patcherOverlay(b, end);
+  if (overlay) {
+    let mpq = -1;
+    for (let at2 = Math.ceil(overlay.after / 512) * 512; at2 + 32 <= b.length; at2 += 512) if (mpqHeaderAt(b, at2)) {
+      mpq = at2;
+      break;
+    }
+    if (mpq < 0) mpq = find(b, overlay.after);
+    if (mpq < 0) throw new PatcherError(say("patcher-no-archive", { plugins: overlay.plugins.length }));
+    return {
+      bytes: b,
+      at: mpq,
+      form: "firegraft-patcher",
+      plugins: overlay.plugins
+    };
+  }
+  const efs = efsAt(b, end);
+  if (efs) {
+    const at2 = archiveAfter(b, efs.after);
+    if (at2 < 0) throw new PatcherError(say("sempq-no-archive", { files: efs.entries.length }));
+    return {
+      bytes: b,
+      at: at2,
+      form: "mpqdraft-sempq",
+      plugins: efs.entries
+    };
+  }
+  const at = archiveAfter(b, end);
+  return at < 0 ? null : {
+    bytes: b,
+    at,
+    form: "archive-after-program",
+    plugins: []
+  };
+}
+var archiveInFile = (b) => archiveAfter(b, 0);
+var isMpq = (b) => b.length >= 32 && (view$1(b).getUint32(0, true) === MPQ_MAGIC || view$1(b).getUint32(0, true) === MPQ_USER);
+var view = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength);
+var isZip = (b) => b.length >= 22 && b[0] === 80 && b[1] === 75 && (b[2] === 3 || b[2] === 5);
+var ZipError = class extends ModError {
+};
+function readZip(b) {
+  const v = view(b);
+  let eocd = -1;
+  for (let at2 = b.length - 22; at2 >= Math.max(0, b.length - 22 - 65535); at2--) if (v.getUint32(at2, true) === 101010256) {
+    eocd = at2;
+    break;
+  }
+  if (eocd < 0) throw new ZipError(say("zip-cut", {}));
+  const count = v.getUint16(eocd + 10, true), dirAt = v.getUint32(eocd + 16, true);
+  if (count === 65535 || dirAt === 4294967295) throw new ZipError(say("zip64", {}));
+  const out = [];
+  let at = dirAt;
+  for (let i2 = 0; i2 < count; i2++) {
+    if (at + 46 > b.length || v.getUint32(at, true) !== 33639248) throw new ZipError(say("zip-damaged", {}));
+    const flags = v.getUint16(at + 8, true), method = v.getUint16(at + 10, true);
+    const packed2 = v.getUint32(at + 20, true), size = v.getUint32(at + 24, true);
+    const nameLength = v.getUint16(at + 28, true), extra = v.getUint16(at + 30, true), comment = v.getUint16(at + 32, true);
+    const local = v.getUint32(at + 42, true);
+    const raw2 = b.subarray(at + 46, at + 46 + nameLength);
+    const path = (flags & 2048 ? new TextDecoder().decode(raw2) : String.fromCharCode(...raw2)).replace(/\\/g, "/");
+    at += 46 + nameLength + extra + comment;
+    if (path.endsWith("/")) continue;
+    if (flags & 1) throw new ZipError(say("zip-encrypted", { path }));
+    if (method !== 0 && method !== 8) throw new ZipError(say("zip-method", {
+      path,
+      method
+    }));
+    out.push({
+      path,
+      size,
+      read: async () => {
+        if (local + 30 > b.length || v.getUint32(local, true) !== 67324752) throw new ZipError(say("zip-member-damaged", { path }));
+        const from = local + 30 + v.getUint16(local + 26, true) + v.getUint16(local + 28, true);
+        const data = b.subarray(from, from + packed2);
+        if (method === 0) return data;
+        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        let bytes;
+        try {
+          bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+        } catch (e) {
+          throw new ZipError(say("zip-member-inflate", {
+            path,
+            detail: e instanceof Error ? e.message || e.name : String(e)
+          }), { cause: e });
+        }
+        if (bytes.length !== size) throw new ZipError(say("zip-member-size", {
+          path,
+          got: bytes.length,
+          size
+        }));
+        return bytes;
+      }
+    });
+  }
+  return out;
+}
+function zipFiles(name, bytes, prefix = name.replace(/\.zip$/i, "")) {
+  const members = readZip(bytes), byPath = new Map(members.map((m) => [`${prefix}/${m.path}`, m]));
+  return {
+    name: name.replace(/\.zip$/i, ""),
+    list: async () => [...byPath].map(([path, m]) => ({
+      path,
+      size: m.size
+    })),
+    read: async (path) => {
+      const m = byPath.get(path);
+      if (!m) throw new ModReadError(say("not-in-tree", {
+        path,
+        name
+      }));
+      return m.read();
+    }
+  };
+}
+var gameName2 = (path) => path.replace(/\//g, "\\").toLowerCase();
+var GAME_FOLDERS = [
+  "arr",
+  "rez",
+  "scripts",
+  "unit",
+  "tileset",
+  "sound",
+  "game",
+  "font",
+  "dlgs",
+  "glue",
+  "triggers",
+  "portrait",
+  "music",
+  "cursor",
+  "local",
+  "parallax",
+  "smk",
+  "maps",
+  "anim",
+  "hd2",
+  "sd",
+  "templates",
+  "staredit",
+  "campaign"
+];
+var GAME_ARCHIVES = [
+  "stardat.mpq",
+  "broodat.mpq",
+  "patch_rt.mpq",
+  "starcraft.mpq",
+  "broodwar.mpq"
+];
+var GAME_ARCHIVE_PRIORITY = {
+  "patch_rt.mpq": 7e3,
+  "broodat.mpq": 2500,
+  "stardat.mpq": 2e3,
+  "broodwar.mpq": 1e3,
+  "starcraft.mpq": 1e3,
+  map: 0
+};
+var TILESET_NAMES = [
+  "badlands",
+  "platform",
+  "install",
+  "ashworld",
+  "jungle",
+  "desert",
+  "ice",
+  "twilight"
+];
+var RACE_NAMES = [
+  "zerg",
+  "terran",
+  "protoss"
+];
+var RACE_FILES = {
+  console: (l) => `game/${l}console.pcx`,
+  overlay: (l) => `game/${l}conover.pcx`,
+  barEmpty: (l) => `game/${l}pbrempt.pcx`,
+  barFull: (l) => `game/${l}pbrfull.pcx`,
+  buttons: (l) => `rez/statbtn${l}.bin`,
+  textBox: (l) => `rez/${l}textbox.bin`,
+  buttonFaces: (l) => `unit/cmdbtns/${l}cmdbtns.grp`
+};
+var INTERFACE_NAMES = /* @__PURE__ */ (() => [
+  ...[
+    "font8",
+    "font10",
+    "font12",
+    "font14",
+    "font16",
+    "font16x"
+  ].map((n) => `font\\${n}.fnt`),
+  "parallax\\star.spk",
+  ...[
+    "minimap",
+    "stat_f10",
+    "statdata",
+    "statfluf",
+    "statlb",
+    "statport",
+    "statres"
+  ].map((n) => `rez\\${n}.bin`),
+  ...RACE_NAMES.flatMap((race) => {
+    const f = (k) => gameName2(RACE_FILES[k](race[0]));
+    return [
+      f("console"),
+      f("overlay"),
+      f("barEmpty"),
+      f("barFull"),
+      f("buttons"),
+      f("textBox"),
+      `dlgs\\${race}.grp`,
+      f("buttonFaces")
+    ];
+  }),
+  "game\\nconsole.pcx",
+  "game\\nconover.pcx",
+  "rez\\statbtnn.bin",
+  "unit\\cmdbtns\\cmdicons.grp",
+  "unit\\cmdbtns\\ticon.pcx",
+  ...[
+    "abrtmenu",
+    "allyfltr",
+    "dlgfatal",
+    "gamemenu",
+    "help",
+    "helpmenu",
+    "lmission",
+    "loadgame",
+    "minimappreview",
+    "msgfltr",
+    "netdlg",
+    "objctdlg",
+    "ok",
+    "okcancel",
+    "options",
+    "quit",
+    "quit2mnu",
+    "quitrepl",
+    "restart",
+    "savegame",
+    "snd_dlg",
+    "spd_dlg",
+    "teamfltr",
+    "timeout",
+    "tips_dlg",
+    "video",
+    "wait",
+    "wmission"
+  ].map((n) => `rez\\${n}.bin`),
+  "rez\\help_txt.tbl",
+  "rez\\network.tbl",
+  "rez\\tips.tbl"
+])();
+function gameFileNames(tileset) {
+  return [
+    ...[
+      "flingy",
+      "orders",
+      "portdata",
+      "sprites",
+      "techdata",
+      "units",
+      "upgrades",
+      "weapons"
+    ].map((n) => `arr\\${n}.dat`),
+    "arr\\portdata.tbl",
+    ...[
+      "blink.grp",
+      "icons.grp",
+      "tblink.pcx",
+      "tfontgam.pcx",
+      "thpbar.pcx",
+      "tminimap.pcx",
+      "tselect.pcx",
+      "tunit.pcx",
+      "twire.pcx"
+    ].map((n) => `game\\${n}`),
+    "dlgs\\tile.grp",
+    "rez\\stat_txt.tbl",
+    "scripts\\aiscript.bin",
+    "scripts\\bwscript.bin",
+    "triggers\\melee.trg",
+    ...[
+      "grpwire",
+      "tranwire",
+      "wirefram"
+    ].map((n) => `unit\\wirefram\\${n}.grp`),
+    ...[
+      "cv5",
+      "grp",
+      "vf4",
+      "vr4",
+      "vx4",
+      "wpe"
+    ].map((e) => `tileset\\${tileset}.${e}`),
+    ...[
+      "bexpl",
+      "bfire",
+      "dark",
+      "gfire",
+      "green",
+      "ofire",
+      "red",
+      "shift",
+      "trans50"
+    ].map((n) => `tileset\\${tileset}\\${n}.pcx`),
+    ...INTERFACE_NAMES
+  ];
+}
+var STARTUP_NAMES = [
+  "scripts\\iscript.bin",
+  "arr\\images.dat",
+  "game\\tselect.pcx",
+  "arr\\images.tbl",
+  "arr\\sfxdata.dat",
+  "arr\\sfxdata.tbl",
+  "arr\\mapdata.dat",
+  "arr\\mapdata.tbl"
+];
+function readsStartupData(names) {
+  for (const n of names) if (STARTUP_NAMES.includes(n) || /^unit\\.*\.(grp|lo[abdlosu])$/.test(n)) return true;
+  return false;
+}
+var DAT_TABLES2 = [
+  "units",
+  "weapons",
+  "flingy",
+  "sprites",
+  "images",
+  "orders",
+  "upgrades",
+  "techdata",
+  "portdata",
+  "sfxdata",
+  "mapdata"
+];
+async function sha256Hex(bytes) {
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  let s = "";
+  for (const x3 of d) s += x3.toString(16).padStart(2, "0");
+  return s;
+}
+var lineName$1 = (l) => l.slice(0, l.indexOf("	"));
+var isSystemLine = (line) => isSystemFile(lineName$1(line));
+async function hashLines(lines) {
+  return hashLinesAsWere(lines.filter((l) => !isSystemLine(l)));
+}
+async function hashLinesAsWere(lines) {
+  const sorted = [...lines].sort((a2, b) => lineName$1(a2) < lineName$1(b) ? -1 : lineName$1(a2) > lineName$1(b) ? 1 : 0);
+  return (await sha256Hex(new TextEncoder().encode(sorted.join("\n")))).slice(0, 16);
+}
+var pluginLine = (name, sha256) => `plugins\\${name.toLowerCase()}	${sha256}`;
+var hasCodeLine = (m) => !m.sameAs && (m.role === "plugin" || m.role === "plugin-loader" || m.role === "library");
+var firegraftLine = (name, sha256) => `${name.toLowerCase()}	${sha256}`;
+var gameFileLine = (name, sha256) => `${gameName2(name)}	${sha256}`;
+async function identityWith(id, changes) {
+  const lines = new Map(id.lines.map((l) => [lineName$1(l), l]));
+  for (const [name, sha] of Object.entries(changes.files ?? {})) {
+    if (/\.fgd$/i.test(name)) continue;
+    const line = /\.fgp$/i.test(name) ? firegraftLine(leafOf2(name), sha ?? "") : gameFileLine(name, sha ?? "");
+    if (sha === null || isSystemLine(line)) lines.delete(lineName$1(line));
+    else lines.set(lineName$1(line), line);
+  }
+  const plugins = { ...id.plugins };
+  for (const [name, sha] of Object.entries(changes.plugins ?? {})) {
+    for (const k of Object.keys(plugins)) if (k.toLowerCase() === name.toLowerCase()) delete plugins[k];
+    if (sha !== null) plugins[name] = sha;
+  }
+  const kept = [...lines.values()].sort();
+  return {
+    lines: kept,
+    plugins,
+    hash: await hashLines([...kept, ...Object.entries(plugins).map(([n, sha]) => pluginLine(n, sha))]),
+    withoutPlugins: await hashLines(kept)
+  };
+}
+function modRoot(paths) {
+  const score = /* @__PURE__ */ new Map(), hasArr = /* @__PURE__ */ new Set();
+  for (const p of paths) {
+    const parts = p.split("/");
+    for (let i2 = 0; i2 < parts.length - 1; i2++) {
+      const folder = parts[i2].toLowerCase();
+      if (!GAME_FOLDERS.includes(folder) || folder === "maps") continue;
+      const root = parts.slice(0, i2).join("/");
+      score.set(root, (score.get(root) ?? 0) + 1);
+      if (folder === "arr") hasArr.add(root);
+    }
+  }
+  const best = (list) => list.sort((a2, b) => (score.get(b) ?? 0) - (score.get(a2) ?? 0) || a2.split("/").length - b.split("/").length)[0];
+  return best([...hasArr]) ?? best([...score.keys()]) ?? "";
+}
+function gameCopyFiles(paths) {
+  const dir = (p) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
+  const leaf2 = (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+  const copies = new Set(paths.filter((p) => leaf2(p) === "stardat.mpq").map((p) => dir(p).toLowerCase()));
+  const out = /* @__PURE__ */ new Set();
+  if (!copies.size) return out;
+  for (const p of paths) {
+    if (copies.has(dir(p).toLowerCase()) && GAME_ARCHIVES.includes(leaf2(p))) {
+      out.add(p);
+      continue;
+    }
+    for (const c2 of copies) if (p.toLowerCase().startsWith(c2 ? `${c2}/maps/` : "maps/")) {
+      out.add(p);
+      break;
+    }
+  }
+  return out;
+}
+function gameCopyFolders(gameCopy) {
+  const dir = (p) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
+  const leaf2 = (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+  const folders = [...new Map(gameCopy.filter((p) => leaf2(p) === "stardat.mpq").map((p) => [dir(p).toLowerCase(), dir(p)])).values()];
+  const of = (p) => {
+    const lower = p.toLowerCase();
+    let best = null;
+    for (const f of folders) {
+      const c2 = f.toLowerCase();
+      if ((dir(lower) === c2 && GAME_ARCHIVES.includes(leaf2(p)) || lower.startsWith(c2 ? `${c2}/maps/` : "maps/")) && (best === null || f.length > best.length)) best = f;
+    }
+    return best ?? dir(p);
+  };
+  const rank = (p) => {
+    const i2 = GAME_ARCHIVES.indexOf(leaf2(p));
+    return i2 < 0 || dir(p).toLowerCase() !== of(p).toLowerCase() ? GAME_ARCHIVES.length : i2;
+  };
+  const groups = /* @__PURE__ */ new Map();
+  for (const p of gameCopy) {
+    const folder = of(p), key = folder.toLowerCase();
+    if (!groups.has(key)) groups.set(key, {
+      folder,
+      paths: []
+    });
+    groups.get(key).paths.push(p);
+  }
+  for (const g of groups.values()) g.paths.sort((a2, b) => rank(a2) - rank(b) || (a2.toLowerCase() < b.toLowerCase() ? -1 : a2.toLowerCase() > b.toLowerCase() ? 1 : 0));
+  return [...groups.values()].sort((a2, b) => a2.folder.toLowerCase() < b.folder.toLowerCase() ? -1 : a2.folder.toLowerCase() > b.folder.toLowerCase() ? 1 : 0);
+}
+function gameCopyText(gameCopy, given) {
+  return gameCopyFolders(gameCopy).map(({ folder, paths }) => {
+    const names = paths.map((p) => p.slice(p.lastIndexOf("/") + 1));
+    return say("game-copy", {
+      folder: folder || given,
+      list: names.slice(0, 6).join(", "),
+      more: Math.max(0, names.length - 6)
+    });
+  });
+}
+var WINDOWS_1252 = /* @__PURE__ */ new TextDecoder("windows-1252");
+function tblStrings(bytes) {
+  if (bytes.length < 2) throw new ModReadError(say("tbl-too-short", {}));
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), count = v.getUint16(0, true);
+  if (2 + 2 * count > bytes.length) throw new ModReadError(say("tbl-offsets-past-end", {}));
+  const out = [];
+  for (let i2 = 0; i2 < count; i2++) {
+    const at = v.getUint16(2 + 2 * i2, true);
+    if (at > bytes.length) throw new ModReadError(say("tbl-string-past-end", { index: i2 }));
+    const end = bytes.indexOf(0, at);
+    out.push(WINDOWS_1252.decode(bytes.subarray(at, end < 0 ? bytes.length : end)));
+  }
+  return out;
+}
+var NAMING_TABLES = [
+  ["arr\\images.tbl", "unit\\"],
+  ["arr\\sfxdata.tbl", "sound\\"],
+  ["arr\\portdata.tbl", "portrait\\"]
+];
+async function namesToProbe(archive, tables2) {
+  const names = /* @__PURE__ */ new Set([...STARTUP_NAMES, ...TILESET_NAMES.flatMap((t2) => [...gameFileNames(t2), `tileset\\${t2}.vx4ex`])]);
+  for (const t2 of DAT_TABLES2) {
+    names.add(`arr\\${t2}.dat`);
+    names.add(`arr\\${t2}.datex`);
+  }
+  for (const n of [
+    "rez\\unitnames.tbl",
+    "unit\\cmdbtns\\uniticons.grp",
+    "rez\\network.tbl"
+  ]) names.add(n);
+  for (const [table, under] of NAMING_TABLES) {
+    let own = null;
+    try {
+      own = archive.fileInfo(table) ? archive.readFile(table) : null;
+    } catch {
+      own = null;
+    }
+    for (const bytes of [own, tables2 ? await tables2(table).catch(() => null) : null]) {
+      if (!bytes) continue;
+      try {
+        for (const n of tblStrings(bytes)) if (n) names.add(gameName2(under + n));
+      } catch {
+      }
+    }
+  }
+  return [...names];
+}
+async function probeNames(archive, tables2) {
+  return (await namesToProbe(archive, tables2)).filter((n) => {
+    try {
+      return !!archive.fileInfo(n);
+    } catch {
+      return false;
+    }
+  });
+}
+var FIREGRAFT_LISTS = [
+  "firegraft\\datalist.txt",
+  "firegraft\\actlist.txt",
+  "firegraft\\displist.txt",
+  "firegraft\\reqlist.txt",
+  "firegraft\\statlist.txt",
+  "plugins\\pluginlist.txt"
+];
+var FIREGRAFT_MOMENT = {
+  at: "file-open",
+  name: "font\\font8.fnt"
+};
+var listedNames = (text) => text ? new TextDecoder("latin1").decode(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
+var DATABASE_116 = /1161\.fgd$/i;
+function firegraftPick(found) {
+  const project = found.findIndex((f) => /\.fgp$/i.test(f.name));
+  if (project < 0) return {
+    project: null,
+    database: null
+  };
+  const fgd = (test) => found.findIndex((f) => /\.fgd$/i.test(f.name) && test(f));
+  let database = fgd((f) => f.place === found[project].place && DATABASE_116.test(f.name));
+  if (database < 0) database = fgd((f) => DATABASE_116.test(f.name));
+  if (database < 0) database = fgd(() => true);
+  return {
+    project,
+    database: database < 0 ? null : database
+  };
+}
+var MPQDRAFT_ENTRY = "GetMPQDraftPlugin";
+function moduleFacts(b) {
+  const ex = exportsOf(b);
+  if (!ex) return {
+    entry: "none",
+    self: null,
+    samase: false,
+    loadsPlugins: false
+  };
+  const has = (n) => ex.names.includes(n);
+  const entry = has(MPQDRAFT_ENTRY) ? "mpqdraft" : has("GetPluginAPI") && has("ApplyPatchSuspended") ? "bwl" : has("SnpBind") ? "snp" : "dllmain";
+  const loads = importsOf(b).some((d) => /^kernel32(\.dll)?$/i.test(d.dll) && d.names.some((n) => /^LoadLibrary(Ex)?[AW]$/.test(n)));
+  return {
+    entry,
+    self: ex.self,
+    samase: has("samase_plugin_init"),
+    loadsPlugins: loads && holdsString(b, MPQDRAFT_ENTRY, ex.spans)
+  };
+}
+var MAX_RACE_NAME = 40;
+var isDeclarableRace = (id) => typeof id === "number" && Number.isInteger(id) && id >= 8 && id <= 255;
+var isPlayedRace = (id) => id === 0 || id === 1 || id === 2;
+function normalizeRace(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  const r2 = row;
+  if (!isDeclarableRace(r2.id) || typeof r2.name !== "string") return null;
+  const name = r2.name.trim();
+  if (!name || name.length > 40) return null;
+  const out = {
+    ...r2,
+    id: r2.id,
+    name
+  };
+  if (typeof r2.letter === "string" && /^[a-z]$/i.test(r2.letter.trim())) out.letter = r2.letter.trim().toLowerCase();
+  else delete out.letter;
+  if (isPlayedRace(r2.like)) out.like = r2.like;
+  else delete out.like;
+  return out;
+}
+function normalizeRaces(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = /* @__PURE__ */ new Set(), out = [];
+  for (const row of value) {
+    const r2 = normalizeRace(row);
+    if (!r2 || seen.has(r2.id)) continue;
+    seen.add(r2.id);
+    out.push(r2);
+    if (out.length >= 248) break;
+  }
+  return out.sort((a2, b) => a2.id - b.id);
+}
+var saidRaces = (value) => Array.isArray(value) ? normalizeRaces(value) : void 0;
+var HASH = /^[0-9a-f]{16}$/;
+function readModJson(text) {
+  let m;
+  try {
+    m = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!m || typeof m !== "object" || Array.isArray(m)) return null;
+  const r2 = m, out = {};
+  if (typeof r2.name === "string" && r2.name.trim()) out.name = r2.name.trim().slice(0, 80);
+  const link = [
+    r2.link,
+    r2.url,
+    r2.homepage
+  ].find((u) => typeof u === "string" && /^https?:\/\//i.test(u));
+  if (link) out.link = link;
+  const races = saidRaces(r2.races);
+  if (races !== void 0) out.races = races;
+  if (typeof r2.hash === "string" && HASH.test(r2.hash)) out.declared = {
+    hash: r2.hash,
+    ...typeof r2.withoutPlugins === "string" && HASH.test(r2.withoutPlugins) ? { withoutPlugins: r2.withoutPlugins } : {}
+  };
+  if (typeof r2.base === "string" && r2.base.trim()) out.base = r2.base.trim();
+  if (typeof r2.scmjs === "number" && Number.isFinite(r2.scmjs)) out.format = r2.scmjs;
+  return out;
+}
+function isModJsonPath(path, top) {
+  const parts = path.split("/");
+  if (parts.pop()?.toLowerCase() !== "mod.json") return false;
+  if (top) {
+    if (parts[0] !== top) return false;
+    parts.shift();
+  }
+  return parts.length === 0 || parts.length === 1 && !GAME_FOLDERS.includes(parts[0].toLowerCase());
+}
+var MOD_KINDS = [
+  "tables",
+  "scripts",
+  "pictures",
+  "sounds",
+  "terrain",
+  "strings",
+  "AI",
+  "maps",
+  "other"
+];
+function kindOf(name) {
+  const lower = gameName2(name);
+  const [top] = lower.split("\\");
+  if (/^scripts\\(aiscript|bwscript)\.bin$/.test(lower)) return "AI";
+  if (top === "scripts") return "scripts";
+  if (top === "arr") return lower.endsWith(".tbl") ? "strings" : /\.dat(ex)?$/.test(lower) ? "tables" : "other";
+  if (top === "tileset") return "terrain";
+  if (top === "maps" || /\.sc[mx]$/.test(lower)) return "maps";
+  if (/\.(wav|ogg)$/.test(lower) || top === "sound" || top === "music") return "sounds";
+  if (lower.endsWith(".tbl") || top === "font") return "strings";
+  if (/\.(grp|pcx|lo[a-z]|dds|anim|smk|spk|bmp|png)$/.test(lower) || [
+    "unit",
+    "game",
+    "dlgs",
+    "cursor",
+    "portrait"
+  ].includes(top)) return "pictures";
+  return "other";
+}
+var DAT_SHAPES = {
+  units: {
+    entries: 228,
+    size: 19876,
+    legacy: 19192,
+    expanded: 97,
+    datex: 99
+  },
+  weapons: {
+    entries: 130,
+    size: 5460,
+    legacy: null,
+    expanded: 42,
+    datex: 42
+  },
+  flingy: {
+    entries: 209,
+    size: 3135,
+    legacy: null,
+    expanded: 15,
+    datex: 15
+  },
+  sprites: {
+    entries: 517,
+    size: 3229,
+    legacy: null,
+    expanded: 7,
+    datex: 7
+  },
+  images: {
+    entries: 999,
+    size: 37962,
+    legacy: null,
+    expanded: 38,
+    datex: 38
+  },
+  upgrades: {
+    entries: 61,
+    size: 1281,
+    legacy: null,
+    expanded: 21,
+    datex: 21
+  },
+  techdata: {
+    entries: 44,
+    size: 836,
+    legacy: null,
+    expanded: 19,
+    datex: 19
+  },
+  orders: {
+    entries: 189,
+    size: 4158,
+    legacy: null,
+    expanded: 22,
+    datex: 23
+  },
+  sfxdata: {
+    entries: 1144,
+    size: 10296,
+    legacy: null,
+    expanded: 9,
+    datex: 9
+  },
+  portdata: {
+    entries: 110,
+    size: 1320,
+    legacy: null,
+    expanded: 12,
+    datex: 12
+  },
+  mapdata: {
+    entries: 65,
+    size: 260,
+    legacy: null,
+    expanded: 4,
+    datex: 4
+  }
+};
+function datTableOf2(name) {
+  const m = /^arr\\([^\\]+)\.dat(?:ex)?$/.exec(gameName2(name));
+  return m && DAT_TABLES2.includes(m[1]) ? m[1] : null;
+}
+function tableShape(name, size) {
+  const table = datTableOf2(name);
+  if (!table) return null;
+  const s = DAT_SHAPES[table];
+  const shape = (layout, entries, legacy = false) => ({
+    table,
+    layout,
+    entries,
+    standard: s.entries,
+    legacy,
+    extended: layout !== null && layout !== "dat"
+  });
+  if (/\.datex$/i.test(name)) return size > 0 && size % s.datex === 0 ? shape("datex", size / s.datex) : shape(null, null);
+  if (size === s.size) return shape("dat", s.entries);
+  if (s.legacy !== null && size === s.legacy) return shape("dat", s.entries, true);
+  if (size > 0 && size % s.expanded === 0) return shape("expanded", size / s.expanded);
+  if (size > 0 && size % s.datex === 0) return shape("datex", size / s.datex);
+  return shape(null, null);
+}
+function gameOf(names) {
+  for (const n of names) if (/^(anim|hd2|sd)\\|\.(dds|anim)$/.test(gameName2(n))) return "remastered";
+  return "1.16.1";
+}
+var PRIORITY = {
+  firegraft: 16776960,
+  pluginLoader: 5e5,
+  mpqdraft: 1e4,
+  folder: 16777216
+};
+var PLUGIN_FILE = /\.(qdp|bwl)$/i;
+var CODE_MEMBER = /\.(qdp|bwl|fgp|fgd)$/i;
+var isPluginFile = (name) => PLUGIN_FILE.test(name);
+function carriedName(m, taken) {
+  const id = m.id.toString(16).padStart(8, "0");
+  let name = m.name && /\.(qdp|dll|bwl)$/i.test(m.name) ? m.name : m.file ? `module-${id}-${m.file.toString(16)}.bin` : `plugin-${id}.qdp`;
+  if (taken.has(name.toLowerCase())) name = name.replace(/(\.[^.]+)$/, `-${id}$1`);
+  taken.add(name.toLowerCase());
+  return name;
+}
+var byName2 = (a2, b) => a2 < b ? -1 : a2 > b ? 1 : 0;
+function plugInOrder(plugins, o) {
+  const load = [], skipped = [];
+  for (const p of [...plugins].sort((a2, b) => byName2(a2.name, b.name))) {
+    const why = p.role === "plugin-loader" ? say("why-plugin-loader", {}) : o.loader && p.name.startsWith("_") ? say("why-underscore", {}) : o.loader && !/\.qdp$/i.test(p.name) ? say("why-qdp-only", {}) : o.loader && p.entry !== "mpqdraft" && p.entry !== "none" ? say("why-no-entry", {}) : o.off?.has(p.name.toLowerCase()) ? say("why-off", {}) : null;
+    if (why) skipped.push({
+      module: p,
+      why
+    });
+    else load.push(p);
+  }
+  return {
+    load,
+    skipped
+  };
+}
+var errorText = (e) => e instanceof Error ? e.message : String(e);
+var MPQ_REASONS = {
+  NoHeader: "mpq-no-header",
+  UnsupportedVersion: "mpq-version",
+  Corrupted: "mpq-damaged",
+  UnsupportedCompression: "mpq-compression",
+  IoError: "mpq-io",
+  FileNotFound: "mpq-file-missing"
+};
+function archiveWhy(e) {
+  const m = e;
+  const ours = !!m && m.name === "MpqError" && typeof m.kind === "string";
+  const detail = ours && typeof m.detail === "string" && m.detail ? m.detail : errorText(e);
+  return say(ours && MPQ_REASONS[m.kind] || "mpq-other", { detail });
+}
+var unopenable = (a2, e) => a2.form === "mpq" ? new ModReadError(say("archive-unopenable", {
+  path: a2.path,
+  why: errorText(e),
+  reason: archiveWhy(e)
+}), { cause: e }) : new ModReadError(say("exe-archive-unopenable", {
+  path: a2.path,
+  at: a2.at,
+  why: errorText(e),
+  reason: archiveWhy(e)
+}), { cause: e });
+var readOrSay = (path, read, zip) => async () => {
+  try {
+    return await read();
+  } catch (e) {
+    if (e instanceof ModReadError) throw e;
+    if (zip !== void 0) throw new ModReadError(say("zip-unreadable", {
+      path: zip,
+      why: e instanceof ModError ? e.detail : errorText(e)
+    }), { cause: e });
+    throw new ModReadError(say("file-unreadable", {
+      path,
+      why: errorText(e)
+    }), { cause: e });
+  }
+};
+var projectRead = (name, archive, read) => async () => {
+  try {
+    return await read();
+  } catch (e) {
+    if (e instanceof ModReadError) throw e;
+    throw new ModReadError(say("firegraft-unreadable", {
+      name: leafOf2(name),
+      path: archive
+    }), { cause: e });
+  }
+};
+async function readMod(tree, o = {}) {
+  const progress = o.progress ?? (() => {
+  });
+  const game = tree.layout === "game";
+  const listed = await tree.list();
+  indexes.set(tree, Promise.resolve(new Set(listed.map((e) => e.path))));
+  const left = [];
+  const all = listed.filter((e) => {
+    const out = inDotFolder(game || !e.path.includes("/") ? e.path : e.path.slice(e.path.indexOf("/") + 1));
+    if (out) left.push({
+      path: e.path,
+      why: "dot-folder"
+    });
+    return !out;
+  });
+  const asPiece = (e) => ({
+    path: e.path,
+    size: e.size,
+    read: readOrSay(e.path, () => tree.read(e.path))
+  });
+  const named = tree.named !== void 0 ? all.find((e) => e.path === tree.named) ?? null : null;
+  const beside = named ? all.filter((e) => e !== named) : [];
+  const said = [];
+  const firstPart = (p) => p.includes("/") ? p.slice(0, p.indexOf("/")) : null;
+  const top = all.length && all.every((e) => firstPart(e.path) !== null && firstPart(e.path) === firstPart(all[0].path)) ? firstPart(all[0].path) : "";
+  const atTop = (path) => folderOf(path) === top;
+  const loose = [], archives = [], pluginPieces = [], libraryPieces = [], dlls = [], providerPieces = [];
+  const paths = [], memberCode = [];
+  const firegraft = [];
+  const unreadable = [], gameCopy = [];
+  const systemLoose = [], system = /* @__PURE__ */ new Map();
+  const takeFiregraft = (f) => {
+    const leaf2 = leafOf2(f.name);
+    if (firegraft.some((x3) => leafOf2(x3.name).toLowerCase() === leaf2.toLowerCase())) return false;
+    firegraft.push({
+      ...f,
+      name: leaf2
+    });
+    return true;
+  };
+  let modJson = null;
+  const sameName = (list, leaf2) => list.some((f) => leafOf2(f.path).toLowerCase() === leaf2);
+  const take = async (pieces, depth, single, base) => {
+    const copy = single ? /* @__PURE__ */ new Set() : gameCopyFiles(pieces.filter((p) => !isSystemFile(p.path)).map((p) => p.path));
+    const copyArchives = [...copy].filter((p) => /\.(mpq|exe|zip)$/i.test(p));
+    if (copyArchives.length) {
+      gameCopy.push(...copyArchives);
+      for (const m of gameCopyText(copyArchives, tree.name)) progress(m);
+    }
+    for (const p of pieces) {
+      if (copy.has(p.path)) {
+        if (!/\.(mpq|exe|zip)$/i.test(p.path)) left.push({
+          path: p.path,
+          why: "game-copy"
+        });
+        continue;
+      }
+      if (isSystemFile(p.path)) {
+        systemLoose.push(p);
+        left.push({
+          path: p.path,
+          why: "system"
+        });
+        continue;
+      }
+      paths.push(p.path);
+      const lower = p.path.toLowerCase();
+      let leaf2 = leafOf2(lower);
+      let bytes = null;
+      if (single && depth === 0 && !/\.(zip|mpq|exe)$/.test(leaf2)) {
+        bytes = await p.read();
+        const as = isZip(bytes) ? "zip" : isMpq(bytes) ? "mpq" : programEnd(bytes) !== null ? "exe" : null;
+        if (as) leaf2 = `${leaf2}.${as}`;
+      }
+      if (PLUGIN_FILE.test(leaf2)) {
+        if (!sameName(pluginPieces, leaf2)) pluginPieces.push(p);
+        else left.push({
+          path: p.path,
+          why: "same-name"
+        });
+      }
+      const library = /\.dll$/.test(leaf2) && lower.split("/").slice(0, -1).includes("plugins");
+      if (library) {
+        if (!sameName(libraryPieces, leaf2)) libraryPieces.push(p);
+        else left.push({
+          path: p.path,
+          why: "same-name"
+        });
+      } else if (/\.dll$/.test(leaf2) && !game) dlls.push(p);
+      if (/\.snp$/.test(leaf2) && !sameName(providerPieces, leaf2)) providerPieces.push(p);
+      if (/\.(fgp|fgd)$/.test(leaf2)) {
+        if (!takeFiregraft({
+          name: p.path,
+          size: p.size,
+          place: folderOf(p.path),
+          path: p.path,
+          read: p.read
+        })) left.push({
+          path: p.path,
+          why: "same-name"
+        });
+        continue;
+      }
+      if (PLUGIN_FILE.test(leaf2) || library || !game && /\.dll$/.test(leaf2)) continue;
+      if (isModJsonPath(p.path, base) && (!modJson || p.path.split("/").length < modJson.path.split("/").length)) modJson = p;
+      if (!/\.(zip|mpq|exe)$/.test(leaf2)) {
+        loose.push(p);
+        continue;
+      }
+      progress(say("opening", { path: p.path }));
+      bytes ??= await p.read();
+      if (/\.zip$/.test(leaf2) && isZip(bytes)) {
+        if (depth > 2) {
+          left.push({
+            path: p.path,
+            why: "too-deep"
+          });
+          continue;
+        }
+        const prefix = p.path.replace(/\.zip$/i, "");
+        let members;
+        try {
+          members = readZip(bytes);
+        } catch (e) {
+          if (e instanceof ZipError) throw new ModReadError(say("zip-unreadable", {
+            path: p.path,
+            why: e.detail
+          }));
+          throw e;
+        }
+        await take(members.map((m) => ({
+          path: `${prefix}/${m.path}`,
+          size: m.size,
+          read: readOrSay(`${prefix}/${m.path}`, m.read, p.path)
+        })), depth + 1, false, single && depth === 0 ? prefix : base);
+      } else if (/\.mpq$/.test(leaf2) && isMpq(bytes)) try {
+        archives.push({
+          path: p.path,
+          archive: Archive.open(bytes),
+          at: 0,
+          form: "mpq",
+          carried: []
+        });
+      } catch (e) {
+        throw unopenable({
+          path: p.path,
+          at: 0,
+          form: "mpq"
+        }, e);
+      }
+      else if (/\.exe$/.test(leaf2)) {
+        let found;
+        try {
+          found = exeArchive(bytes);
+          if (!found && programEnd(bytes) === null) {
+            const at = archiveInFile(bytes);
+            if (at >= 0) found = {
+              bytes,
+              at,
+              form: "archive-after-program",
+              plugins: []
+            };
+          }
+        } catch (e) {
+          if (e instanceof PatcherError) throw new ModReadError(say("exe-unreadable", {
+            path: p.path,
+            why: e.detail
+          }));
+          throw e;
+        }
+        if (!found) {
+          if (single && depth === 0) throw new ModReadError(say("exe-no-archive", { path: p.path }));
+          left.push({
+            path: p.path,
+            why: "program"
+          });
+          continue;
+        }
+        try {
+          archives.push({
+            path: p.path,
+            archive: Archive.open(found.bytes, { offset: found.at }),
+            at: found.at,
+            form: found.form,
+            carried: found.plugins
+          });
+        } catch (e) {
+          throw unopenable({
+            path: p.path,
+            at: found.at,
+            form: found.form
+          }, e);
+        }
+      } else loose.push(p);
+    }
+  };
+  await take((named ? [named] : all).map(asPiece), 0, !!named, top);
+  if (named) {
+    for (const e of beside) if (/\.dll$/i.test(e.path) && !isSystemFile(e.path)) dlls.push(asPiece(e));
+  }
+  const layers = [];
+  let fireIndex = 0, draftIndex = 0;
+  const layerOf = async (a2) => {
+    const archive = a2.archive;
+    let names2;
+    try {
+      names2 = (archive.files() ?? []).filter((n) => !n.startsWith("("));
+    } catch (e) {
+      throw unopenable(a2, e);
+    }
+    const probed = !names2.length;
+    if (probed) {
+      progress(say("probing", { path: a2.path }));
+      names2 = await probeNames(archive, o.tables);
+    }
+    const leaf2 = leafOf2(a2.path).toLowerCase();
+    const replaces = a2.form === "mpq" && GAME_ARCHIVES.includes(leaf2) && atTop(a2.path) ? leaf2 : void 0;
+    const by = a2.form === "firegraft-patcher" ? "firegraft-patcher" : a2.form === "mpqdraft-sempq" ? "mpqdraft-sempq" : a2.form === "archive-after-program" ? "self-executing" : replaces ? "replacement" : "mpqdraft";
+    const priority = by === "firegraft-patcher" ? PRIORITY.firegraft + fireIndex++ : replaces ? GAME_ARCHIVE_PRIORITY[replaces] : PRIORITY.mpqdraft + draftIndex++;
+    const files2 = [];
+    const read = (n) => async () => a2.archive.readFile(n) ?? /* @__PURE__ */ new Uint8Array(0);
+    for (const n of names2) {
+      const name2 = gameName2(n);
+      let info = null;
+      try {
+        info = archive.fileInfo(n);
+      } catch {
+        info = null;
+      }
+      if (!info) {
+        unreadable.push(`${name2} (${a2.path})`);
+        continue;
+      }
+      if (isSystemFile(name2)) {
+        system.set(name2, {
+          read: read(n),
+          archive: a2,
+          member: n
+        });
+        continue;
+      }
+      if (/\.(fgp|fgd)$/.test(name2)) takeFiregraft({
+        name: n,
+        size: info.uncompressedSize,
+        place: a2.path,
+        archive: a2.path,
+        member: n,
+        read: projectRead(n, a2.path, read(n))
+      });
+      if (CODE_MEMBER.test(name2)) {
+        paths.push(n);
+        memberCode.push(n);
+        continue;
+      }
+      files2.push({
+        name: name2,
+        size: info.uncompressedSize,
+        member: n
+      });
+    }
+    let datalist = null;
+    try {
+      datalist = archive.fileInfo(FIREGRAFT_LISTS[0]) ? archive.readFile(FIREGRAFT_LISTS[0]) : null;
+    } catch {
+      datalist = null;
+    }
+    const fromList = listedNames(datalist);
+    if (probed) for (const n of fromList) {
+      if (!/\.(fgp|fgd)$/i.test(n)) continue;
+      let info = null;
+      try {
+        info = archive.fileInfo(n);
+      } catch {
+        info = null;
+      }
+      if (info) takeFiregraft({
+        name: n,
+        size: info.uncompressedSize,
+        place: a2.path,
+        archive: a2.path,
+        member: n,
+        byList: true,
+        read: projectRead(n, a2.path, read(n))
+      });
+    }
+    const last = new Map(files2.map((f, i2) => [f.name, i2]));
+    return {
+      kind: "archive",
+      path: a2.path,
+      at: a2.at,
+      priority,
+      by,
+      ...replaces ? { replaces } : {},
+      files: files2.filter((f, i2) => last.get(f.name) === i2),
+      ...probed ? { probed: true } : {}
+    };
+  };
+  for (const a2 of archives) layers.push(await layerOf(a2));
+  const underGameFolder = (path) => path.toLowerCase().split("/").slice(0, -1).some((f) => f !== "maps" && GAME_FOLDERS.includes(f));
+  const root = game ? "" : loose.some((p) => underGameFolder(p.path)) ? modRoot(loose.map((p) => p.path)) : top && !GAME_FOLDERS.includes(top.toLowerCase()) ? top : "";
+  const gameFile = (rel) => game || rel.includes("/") && !["plugins", "firegraft"].includes(rel.split("/")[0].toLowerCase());
+  const looseFiles = [];
+  const json = modJson;
+  const leaveOut = (p, why) => {
+    if (p !== json && !providerPieces.includes(p)) left.push({
+      path: p.path,
+      why
+    });
+  };
+  for (const p of loose) {
+    if (root && !p.path.startsWith(root + "/")) {
+      leaveOut(p, "outside");
+      continue;
+    }
+    const rel = root ? p.path.slice(root.length + 1) : p.path;
+    if (!gameFile(rel)) {
+      leaveOut(p, "beside");
+      continue;
+    }
+    looseFiles.push({
+      name: gameName2(rel),
+      size: p.size,
+      path: p.path,
+      read: p.read
+    });
+  }
+  for (const p of systemLoose) {
+    if (/\.(qdp|bwl|fgp|fgd|dll)$/i.test(p.path)) continue;
+    if (root && !p.path.startsWith(root + "/")) continue;
+    const rel = root ? p.path.slice(root.length + 1) : p.path;
+    if (!gameFile(rel)) continue;
+    system.set(gameName2(rel), {
+      read: p.read,
+      path: p.path
+    });
+  }
+  const duplicates = [];
+  const byGameName = /* @__PURE__ */ new Map();
+  for (const f of looseFiles) {
+    const list = byGameName.get(f.name);
+    if (list) list.push(f.path);
+    else byGameName.set(f.name, [f.path]);
+  }
+  for (const [name2, list] of byGameName) if (list.length > 1) duplicates.push({
+    name: name2,
+    paths: list
+  });
+  const told = /* @__PURE__ */ new Map();
+  const factsOf = async (bytes) => ({
+    ...moduleFacts(bytes),
+    sha256: await sha256Hex(bytes)
+  });
+  const programs = new Set(archives.filter((a2) => a2.form !== "mpq").map((a2) => folderOf(a2.path)));
+  const besideProgram = dlls.filter((d) => named || programs.has(folderOf(d.path)));
+  for (const d of dlls) if (!besideProgram.includes(d) && !named) left.push({
+    path: d.path,
+    why: "library"
+  });
+  for (const p of [
+    ...pluginPieces,
+    ...libraryPieces,
+    ...besideProgram,
+    ...providerPieces
+  ]) told.set(p, await factsOf(await p.read()));
+  const fileModules = pluginPieces.map((p) => {
+    const f = told.get(p);
+    return {
+      name: leafOf2(p.path),
+      role: f.loadsPlugins ? "plugin-loader" : f.entry === "snp" ? "provider" : "plugin",
+      entry: f.entry,
+      samase: f.samase,
+      id: null,
+      source: {
+        kind: "file",
+        path: p.path
+      },
+      size: p.size,
+      sha256: f.sha256,
+      load: false
+    };
+  });
+  const bySha = new Map(fileModules.map((m) => [m.sha256, m.name]));
+  const taken = new Set(fileModules.map((m) => m.name.toLowerCase()));
+  const carriedModules = [], carried = [];
+  for (const a2 of archives) for (const [index, c2] of a2.carried.entries()) {
+    const f = await factsOf(c2.bytes);
+    const source = {
+      kind: "carried",
+      exe: a2.path,
+      form: a2.form,
+      index,
+      at: c2.at,
+      size: c2.size,
+      file: c2.file
+    };
+    if (a2.form === "mpqdraft-sempq" && c2.id === 789274440 && c2.file === 2700920039) {
+      carriedModules.push({
+        name: carriedName(c2, taken),
+        role: "patcher",
+        entry: f.entry,
+        samase: f.samase,
+        id: c2.id,
+        source,
+        size: c2.size,
+        sha256: f.sha256,
+        load: false,
+        why: say("why-mpqdraft-patcher", {})
+      });
+      continue;
+    }
+    if (!c2.execute) {
+      carried.push({
+        name: carriedName(c2, taken),
+        source,
+        plugin: c2.id,
+        module: c2.file ?? 0,
+        why: say("why-plugin-data", { id: c2.id.toString(16).padStart(8, "0") })
+      });
+      continue;
+    }
+    const sameAs = bySha.get(f.sha256);
+    carriedModules.push({
+      name: sameAs ?? carriedName(c2, taken),
+      role: f.loadsPlugins ? "plugin-loader" : "plugin",
+      entry: f.entry,
+      samase: f.samase,
+      id: c2.id,
+      source,
+      size: c2.size,
+      sha256: f.sha256,
+      ...sameAs ? { sameAs } : {},
+      load: false
+    });
+  }
+  for (const n of memberCode) if (PLUGIN_FILE.test(n)) carried.push({
+    name: leafOf2(n),
+    source: {
+      kind: "member",
+      archive: archives.find((a2) => {
+        try {
+          return !!a2.archive.fileInfo(n);
+        } catch {
+          return false;
+        }
+      })?.path ?? "",
+      member: n
+    },
+    why: say("why-plugin-in-archive", {})
+  });
+  const libraryModules = [];
+  const libSeen = /* @__PURE__ */ new Set();
+  for (const p of [...libraryPieces].sort((a2, b) => byName2(leafOf2(a2.path), leafOf2(b.path))).concat([...besideProgram].sort((a2, b) => byName2(a2.path, b.path)))) {
+    const name2 = leafOf2(p.path);
+    if (libSeen.has(name2.toLowerCase())) {
+      left.push({
+        path: p.path,
+        why: "same-name"
+      });
+      continue;
+    }
+    libSeen.add(name2.toLowerCase());
+    const f = told.get(p);
+    libraryModules.push({
+      name: name2,
+      role: f.entry === "snp" ? "provider" : "library",
+      entry: f.entry,
+      samase: f.samase,
+      id: null,
+      source: {
+        kind: "file",
+        path: p.path
+      },
+      size: p.size,
+      sha256: f.sha256,
+      load: false,
+      why: say("why-library", {})
+    });
+  }
+  for (const p of [...providerPieces].sort((a2, b) => byName2(a2.path, b.path))) {
+    const name2 = leafOf2(p.path);
+    if (libSeen.has(name2.toLowerCase())) continue;
+    libSeen.add(name2.toLowerCase());
+    const f = told.get(p);
+    libraryModules.push({
+      name: name2,
+      role: "provider",
+      entry: f.entry,
+      samase: f.samase,
+      id: null,
+      source: {
+        kind: "file",
+        path: p.path
+      },
+      size: p.size,
+      sha256: f.sha256,
+      load: false,
+      why: say("why-provider", {})
+    });
+  }
+  const pluginLoader = [...carriedModules, ...fileModules].find((m) => m.role === "plugin-loader") ?? null;
+  let order = 0;
+  for (const m of carriedModules) {
+    if (m.role === "patcher") continue;
+    if (m.sameAs) {
+      m.why = say("why-same-plugin", { name: m.sameAs });
+      continue;
+    }
+    if (m.role === "plugin-loader") {
+      m.why = say("why-plugin-loader", {});
+      continue;
+    }
+    m.load = true;
+    m.order = order++;
+  }
+  const plan = plugInOrder(fileModules, { loader: !!pluginLoader });
+  for (const m of plan.load) {
+    m.load = true;
+    m.order = order++;
+  }
+  for (const s of plan.skipped) s.module.why = s.why;
+  const modules = [
+    ...carriedModules,
+    ...fileModules,
+    ...libraryModules
+  ].sort((a2, b) => (a2.order ?? Infinity) - (b.order ?? Infinity));
+  if (looseFiles.length > 0 || !!root && !!pluginLoader) {
+    const byLoader = !!pluginLoader;
+    layers.push({
+      kind: "folder",
+      path: root,
+      priority: byLoader ? PRIORITY.pluginLoader : PRIORITY.folder,
+      by: byLoader ? "plugin-loader" : "folder",
+      files: looseFiles.map(({ read: _read, ...f }) => f)
+    });
+  }
+  const cacheOf = /* @__PURE__ */ new Map();
+  if (pluginLoader) {
+    const piece = pluginLoader.source.kind === "file" ? pluginPieces.find((p) => p.path === pluginLoader.source.path) : null;
+    const carriedBy = pluginLoader.source.kind === "carried" ? archives.find((a2) => a2.path === pluginLoader.source.exe)?.carried[pluginLoader.source.index] : null;
+    const bytes = piece ? await piece.read() : carriedBy?.bytes ?? null;
+    for (const l of [...layers]) {
+      const a2 = l.kind === "archive" ? archives.find((x3) => x3.path === l.path) : null;
+      if (!bytes || !a2 || a2.form !== "mpq" || l.replaces) continue;
+      const leaf2 = leafOf2(a2.path);
+      if (!holdsString(bytes, leaf2) && !holdsString(bytes, leaf2.toLowerCase())) continue;
+      cacheOf.set(a2.path, pluginLoader.name);
+      if (looseFiles.length) {
+        layers.splice(layers.indexOf(l), 1);
+        said.push(say("packing-laid-instead", {
+          path: a2.path,
+          loader: pluginLoader.name,
+          priority: PRIORITY.pluginLoader
+        }));
+      } else {
+        l.priority = PRIORITY.pluginLoader;
+        l.by = "plugin-loader";
+      }
+    }
+  }
+  layers.sort((a2, b) => a2.priority - b.priority);
+  const readers = /* @__PURE__ */ new Map();
+  const winner = /* @__PURE__ */ new Map();
+  const looseByPath = new Map(looseFiles.map((f) => [f.path, f.read]));
+  layers.forEach((l, k) => {
+    const a2 = l.kind === "archive" ? archives.find((x3) => x3.path === l.path) : null;
+    for (const f of l.files) {
+      winner.set(f.name, {
+        ...f,
+        layer: k
+      });
+      readers.set(f.name, a2 ? async () => a2.archive.readFile(f.member) ?? /* @__PURE__ */ new Uint8Array(0) : looseByPath.get(f.path));
+    }
+  });
+  const files = [...winner.values()].sort((a2, b) => byName2(a2.name, b.name));
+  const copies = gameCopyFolders(gameCopy);
+  if (copies.length && !archives.length && !pluginPieces.length && !firegraft.length && !loose.some((p) => underGameFolder(p.path))) said.push(say("copy-only", { folder: copies[0].folder || tree.name }));
+  const pluginSha = {};
+  for (const m of fileModules) pluginSha[m.name] = m.sha256;
+  const fileLines = Object.entries(pluginSha).map(([n, sha]) => pluginLine(n, sha));
+  for (const m of [...carriedModules, ...libraryModules]) if (hasCodeLine(m)) pluginSha[m.name] ??= m.sha256;
+  const projects = firegraft.filter((f) => /\.fgp$/i.test(f.name)).map((f) => ({
+    name: f.name,
+    byList: !!f.byList,
+    archive: f.archive,
+    read: f.read
+  }));
+  const systemPlan = [...system].map(([name2, s]) => ({
+    name: name2,
+    archive: s.archive,
+    read: s.read
+  }));
+  const hashing = o.hashFiles !== false;
+  const laid = new Set(layers.filter((l) => l.kind === "archive").map((l) => l.path));
+  const settle = async (read) => {
+    try {
+      const b = await read();
+      return async () => b;
+    } catch (e) {
+      return async () => {
+        throw e;
+      };
+    }
+  };
+  for (const a2 of archives) {
+    if (laid.has(a2.path) || !a2.archive) continue;
+    if (hashing) {
+      for (const f of projects) if (f.archive === a2.path) f.read = await settle(f.read);
+      for (const f of systemPlan) if (f.archive === a2) f.read = await settle(f.read);
+    }
+    a2.archive = null;
+  }
+  if (o.archives) {
+    for (const a2 of archives) if (a2.archive) o.archives.set(a2.path, a2.archive);
+  }
+  const hashed = hashing ? await hashPlan({
+    files,
+    layers,
+    read: (f) => readers.get(f.name)(),
+    projects,
+    plugins: pluginSha,
+    fileLines,
+    system: systemPlan
+  }, progress, o.onFile) : null;
+  if (hashed) unreadable.push(...hashed.unreadable);
+  let name = tree.name, link, races, declared, manifest;
+  let namedByJson = false;
+  if (json) {
+    const m = readModJson(new TextDecoder().decode(await json.read()));
+    if (!m) said.push(say("json-unreadable", { path: json.path }));
+    else {
+      manifest = {
+        path: json.path,
+        ...m.base !== void 0 ? { base: m.base } : {},
+        ...m.format !== void 0 ? { format: m.format } : {}
+      };
+      if (m.name) {
+        name = m.name;
+        namedByJson = true;
+      }
+      link = m.link;
+      races = m.races;
+      declared = m.declared;
+      if (m.format !== void 0) said.push(say("text-folder", {
+        path: json.path,
+        format: m.format
+      }));
+    }
+  }
+  const holders = archives.filter((a2) => a2.form !== "mpq" && atTop(a2.path));
+  if (!namedByJson && !named && holders.length === 1) name = leafOf2(holders[0].path).replace(/\.exe$/i, "");
+  const loaders = [];
+  for (const a2 of archives) {
+    const words2 = a2.form === "firegraft-patcher" ? say("loader-firegraft", { plugins: a2.carried.length }) : a2.form === "mpqdraft-sempq" ? say("loader-sempq", { files: a2.carried.length }) : a2.form === "archive-after-program" ? say("loader-self-executing", {}) : layers.find((l) => l.path === a2.path)?.replaces ? say("loader-replacement", { name: leafOf2(a2.path) }) : say("loader-mpqdraft", {});
+    const cache = cacheOf.get(a2.path);
+    loaders.push({
+      kind: layers.find((l) => l.path === a2.path)?.by ?? "plugin-loader",
+      path: a2.path,
+      words: cache ? say("loader-packing", {
+        loader: cache,
+        priority: PRIORITY.pluginLoader,
+        laid: layers.some((l) => l.path === a2.path) ? "no" : "yes"
+      }) : words2
+    });
+  }
+  if (pluginLoader) loaders.push({
+    kind: "plugin-loader",
+    path: pluginLoader.name,
+    words: say("loader-plugin-loader", { priority: PRIORITY.pluginLoader })
+  });
+  else if (looseFiles.length || pluginPieces.length) loaders.push({
+    kind: "folder",
+    path: root,
+    words: say("loader-folder", {})
+  });
+  if (unreadable.length) said.push(say("unheld", {
+    list: unreadable.slice(0, 3).join(", "),
+    more: Math.max(0, unreadable.length - 3)
+  }));
+  for (const d of duplicates) said.push(say("duplicate", {
+    name: d.name,
+    paths: d.paths.join(", ")
+  }));
+  const copyWords = gameCopyText(copies.flatMap((c2) => c2.paths), tree.name);
+  said.push(...copyWords);
+  if (!files.length && !said.some((s) => s.key === "game-copy" || s.key === "copy-only")) said.push(say("no-game-files", { name: tree.name }));
+  const fg = firegraftPick(firegraft);
+  const patches = fg.project === null ? [] : [{
+    kind: "firegraft",
+    files: firegraft.map(({ read: _read, ...f }) => f),
+    project: fg.project,
+    database: fg.database,
+    moment: FIREGRAFT_MOMENT
+  }];
+  const names = files.map((f) => f.name);
+  const known = {
+    plugins: pluginSha,
+    ...declared ? { declared } : {},
+    code: modules.some((m) => m.load) || patches.length > 0,
+    readsStartupData: readsStartupData(names) || layers.some((l) => l.probed && !l.files.length)
+  };
+  const systemFiles = [...system].map(([name2, s]) => s.path !== void 0 ? {
+    name: name2,
+    path: s.path
+  } : {
+    name: name2,
+    archive: s.archive.path,
+    member: s.member
+  }).sort((a2, b) => byName2(a2.name, b.name));
+  return {
+    version: 1,
+    name,
+    ...link ? { link } : {},
+    ...races !== void 0 ? { races } : {},
+    ...manifest ? { manifest } : {},
+    game: gameOf(names),
+    loaders,
+    layers,
+    files,
+    modules,
+    patches,
+    carried,
+    identity: hashed ? identityOf(hashed, known) : known,
+    said,
+    unreadable,
+    gameCopy: copies.flatMap((c2) => c2.paths),
+    left,
+    duplicates,
+    systemFiles,
+    named: {
+      plugins: [...new Set(paths.filter((p) => PLUGIN_FILE.test(p)).map(leafOf2))].sort(),
+      projects: [...new Set(paths.filter((p) => /\.fgp$/i.test(p)).map(leafOf2))].sort(),
+      patcherPlugins: archives.flatMap((a2) => a2.carried.filter((c2) => c2.execute && !(c2.id === 789274440 && c2.file === 2700920039)).map((c2) => ({
+        exe: a2.path,
+        form: a2.form,
+        name: c2.name,
+        id: c2.id
+      })))
+    }
+  };
+}
+async function hashPlan(p, progress, onFile) {
+  const lines = [], unreadable = [];
+  let done = 0, last = 0;
+  for (const f of p.files) {
+    let bytes;
+    try {
+      bytes = await p.read(f);
+    } catch {
+      const l = p.layers[f.layer];
+      unreadable.push(l.kind === "archive" ? `${f.name} (${l.path})` : f.name);
+      done++;
+      continue;
+    }
+    lines.push(`${f.name}	${await sha256Hex(bytes)}`);
+    await onFile?.(f, bytes);
+    done++;
+    if (Date.now() - last > 200) {
+      last = Date.now();
+      progress(say("reading-files", {
+        done,
+        total: p.files.length
+      }));
+    }
+  }
+  const was = [...lines];
+  for (const f of p.projects) {
+    const line = firegraftLine(f.name, await sha256Hex(await f.read()));
+    lines.push(line);
+    if (!f.byList) was.push(line);
+  }
+  const pluginLines = Object.entries(p.plugins).map(([n, sha]) => pluginLine(n, sha));
+  const hash = await hashLines([...lines, ...pluginLines]), withoutPlugins = await hashLines(lines);
+  const before = await hashLines([...was, ...p.fileLines]);
+  const beforeCode = before !== hash && before !== withoutPlugins ? before : void 0;
+  let older;
+  const counted = [];
+  for (const s of p.system) try {
+    counted.push(`${s.name}	${await sha256Hex(await s.read())}`);
+  } catch {
+  }
+  if (counted.length) {
+    const were = [...was, ...counted];
+    const sorted = [...counted].sort((a2, b) => byName2(lineName(a2), lineName(b)));
+    older = {
+      hash: await hashLinesAsWere([...were, ...p.fileLines]),
+      ...p.fileLines.length ? { withoutPlugins: await hashLinesAsWere(were) } : {},
+      files: counted.map(lineName).sort(),
+      lines: sorted
+    };
+  }
+  const gameLines = lines.filter((l) => !/\.fgp\t/i.test(l));
+  const earlier = [{
+    rule: "before-code",
+    hash: before,
+    withoutPlugins: await hashLines(was)
+  }];
+  if (p.projects.some((f) => f.byList)) earlier.push({
+    rule: "before-unlisted-project",
+    hash: await hashLines([...was, ...pluginLines]),
+    withoutPlugins: await hashLines(was)
+  });
+  if (older) earlier.push({
+    rule: "older",
+    hash: older.hash,
+    ...older.withoutPlugins ? { withoutPlugins: older.withoutPlugins } : {}
+  });
+  earlier.push({
+    rule: "game-files",
+    hash: await hashLines(gameLines)
+  });
+  if (older) earlier.push({
+    rule: "game-files-older",
+    hash: await hashLinesAsWere([...gameLines, ...counted])
+  });
+  return {
+    lines: lines.sort(),
+    hash,
+    withoutPlugins,
+    ...beforeCode ? { beforeCode } : {},
+    ...older ? { older } : {},
+    earlier,
+    unreadable
+  };
+}
+var lineName = (l) => l.slice(0, l.indexOf("	"));
+function identityOf(h2, known) {
+  return {
+    lines: h2.lines,
+    plugins: known.plugins,
+    hash: h2.hash,
+    withoutPlugins: h2.withoutPlugins,
+    ...h2.beforeCode ? { beforeCode: h2.beforeCode } : {},
+    ...h2.older ? { older: h2.older } : {},
+    ...known.declared ? { declared: known.declared } : {},
+    code: known.code,
+    readsStartupData: known.readsStartupData,
+    earlier: h2.earlier
+  };
+}
+var indexes = /* @__PURE__ */ new WeakMap();
+function indexOf(tree, again = false) {
+  let index = indexes.get(tree);
+  if (!index || again) {
+    const made = tree.list().then((l) => new Set(l.map((e) => e.path)));
+    made.catch(() => {
+      if (indexes.get(tree) === made) indexes.delete(tree);
+    });
+    indexes.set(tree, index = made);
+  }
+  return index;
+}
+async function readFrom(tree, path, zips) {
+  let listed = await indexOf(tree);
+  for (let pass = 0; pass < 2; pass++) {
+    if (listed.has(path)) return tree.read(path);
+    const parts = path.split("/");
+    for (let k = parts.length - 1; k >= 1; k--) {
+      const folder = parts.slice(0, k).join("/"), zip = `${folder}.zip`;
+      if (!listed.has(zip)) continue;
+      let inner = zips?.get(zip);
+      if (!inner) {
+        inner = zipFiles(zip, await tree.read(zip), folder);
+        zips?.set(zip, inner);
+      }
+      return readFrom(inner, path, zips);
+    }
+    if (pass === 0) listed = await indexOf(tree, true);
+  }
+  throw new ModReadError(say("not-in-tree", {
+    path,
+    name: tree.name
+  }));
+}
+async function readPath(tree, path) {
+  return readFrom(tree, path);
+}
+function opener(tree, archives = /* @__PURE__ */ new Map()) {
+  const opening = /* @__PURE__ */ new Map(), zips = /* @__PURE__ */ new Map();
+  return {
+    archives,
+    file: (path) => readFrom(tree, path, zips),
+    /** The archive in the file at `path`, its header at `at` (an exe's), else where storm finds one. */
+    archive(path, at) {
+      const have = archives.get(path);
+      if (have) return Promise.resolve(have);
+      let p = opening.get(path);
+      if (!p) {
+        p = readFrom(tree, path, zips).then((b) => {
+          const a2 = Archive.open(b, at ? { offset: at } : void 0);
+          archives.set(path, a2);
+          return a2;
+        });
+        const made = p;
+        opening.set(path, made);
+        made.then(() => opening.delete(path), () => opening.delete(path));
+      }
+      return p;
+    },
+    close() {
+      archives.clear();
+      opening.clear();
+      zips.clear();
+    }
+  };
+}
+function fileReaders(tree, d, o = {}) {
+  const open = opener(tree, o.archives);
+  const reader = ((f) => {
+    const l = d.layers[f.layer];
+    if (l.kind === "folder") return () => open.file(f.path);
+    return async () => (await open.archive(l.path, l.at)).readFile(f.member) ?? /* @__PURE__ */ new Uint8Array(0);
+  });
+  reader.close = () => open.close();
+  return reader;
+}
+async function modIdentity(tree, d, o = {}) {
+  const open = opener(tree, o.archives);
+  const member = async (archive, name) => (await open.archive(archive, d.layers.find((l) => l.kind === "archive" && l.path === archive)?.at)).readFile(name) ?? /* @__PURE__ */ new Uint8Array(0);
+  const fromTree = (f) => f.path !== void 0 ? open.file(f.path) : member(f.archive, f.member);
+  try {
+    return identityOf(await hashPlan({
+      files: d.files,
+      layers: d.layers,
+      read: (f) => {
+        const l = d.layers[f.layer];
+        return l.kind === "folder" ? open.file(f.path) : member(l.path, f.member);
+      },
+      projects: (d.patches[0]?.files ?? []).filter((f) => /\.fgp$/i.test(f.name)).map((f) => ({
+        name: f.name,
+        byList: !!f.byList,
+        read: f.path !== void 0 ? readOrSay(f.path, () => fromTree(f)) : projectRead(f.name, f.archive, () => fromTree(f))
+      })),
+      plugins: d.identity.plugins,
+      fileLines: d.modules.filter((m) => m.source.kind === "file" && isPluginFile(m.source.path)).map((m) => pluginLine(m.name, m.sha256)),
+      system: (d.systemFiles ?? []).map((s) => ({
+        name: s.name,
+        read: () => fromTree(s)
+      }))
+    }, o.progress ?? (() => {
+    }), o.onFile), d.identity);
+  } finally {
+    if (!o.archives) open.close();
+  }
+}
+async function moduleBytes(tree, m) {
+  const s = m.source;
+  if (!s) throw new ModReadError(say("module-no-source", { name: m.name }));
+  if (s.kind === "file") return readPath(tree, s.path);
+  if (s.kind === "carried") return (await readPath(tree, s.exe)).subarray(s.at, s.at + s.size);
+  throw new ModReadError(say("module-in-archive", {
+    name: m.name,
+    archive: s.archive
+  }));
+}
+async function openLayer(tree, l, o = {}) {
+  const have = o.archives?.get(l.path);
+  if (have) return have;
+  const a2 = Archive.open(await readPath(tree, l.path), l.at ? { offset: l.at } : void 0);
+  o.archives?.set(l.path, a2);
+  return a2;
+}
+async function firegraftBytes(tree, d, f, o = {}) {
+  if (f.path !== void 0) return readPath(tree, f.path);
+  const l = d.layers.find((x3) => x3.path === f.archive);
+  if (!l) throw new ModReadError(say("firegraft-archive-missing", {
+    name: f.name,
+    archive: f.archive ?? ""
+  }));
+  const b = (await openLayer(tree, l, o)).readFile(f.member);
+  if (!b) throw new ModReadError(say("firegraft-unreadable", {
+    name: f.name,
+    path: l.path
+  }));
+  return b;
+}
+
 // dom.ts
 function h(tag2, props = null, ...children) {
   const el = document.createElement(tag2);
@@ -14440,6 +17069,7 @@ function bindLanguage(api) {
 var t = (text, params) => i18n ? i18n.t(text, params) : english(text, params);
 var translate = (text, params) => i18n ? i18n.t(text, params) : english(text, params);
 var msg2 = (text) => text;
+var modWords = (message) => renderMessage(message, (template, params) => translate(template, params));
 function english(text, params = {}) {
   let out = "";
   for (let i2 = 0; i2 < text.length; i2++) {
@@ -14480,478 +17110,7 @@ function closing(s, open) {
   return s.length;
 }
 
-// races.ts
-var FIRST_RACE = 8;
-var LAST_RACE = 255;
-var RACE_NAME_MAX = 40;
-var GAME_RACES = [msg2("Zerg"), msg2("Terran"), msg2("Protoss"), msg2("Independent"), msg2("Neutral"), msg2("User Selectable"), msg2("Random"), msg2("Inactive")];
-var GAME_LETTERS = { z: msg2("Zerg"), t: msg2("Terran"), p: msg2("Protoss"), n: msg2("Neutral") };
-function normalizeRaces(value) {
-  if (!Array.isArray(value)) return [];
-  const seen = /* @__PURE__ */ new Set();
-  const out = [];
-  for (const row of value) {
-    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-    const r2 = row;
-    const id = r2.id;
-    if (typeof id !== "number" || !Number.isInteger(id) || id < FIRST_RACE || id > LAST_RACE || seen.has(id)) continue;
-    const name = typeof r2.name === "string" ? r2.name.trim() : "";
-    if (!name || name.length > RACE_NAME_MAX) continue;
-    const kept = { ...r2, id, name };
-    delete kept.letter;
-    delete kept.like;
-    const letter = typeof r2.letter === "string" && /^[a-z]$/i.test(r2.letter.trim()) ? r2.letter.trim().toLowerCase() : void 0;
-    if (letter) kept.letter = letter;
-    if (r2.like === 0 || r2.like === 1 || r2.like === 2) kept.like = r2.like;
-    seen.add(id);
-    out.push(kept);
-  }
-  return out.sort((a2, b) => a2.id - b.id);
-}
-function sameRaces(a2, b) {
-  return a2.length === b.length && a2.every((r2, i2) => r2.id === b[i2].id && r2.name === b[i2].name && r2.letter === b[i2].letter && r2.like === b[i2].like);
-}
-var emptyDraft = () => ({ id: "", name: "", letter: "", like: "" });
-var draftOf = (r2) => ({ id: String(r2.id), name: r2.name, letter: r2.letter ?? "", like: r2.like === void 0 ? "" : String(r2.like) });
-function checkRow(draft, rows2, editing) {
-  const errors = {};
-  const was = editing === null ? null : rows2.find((r2) => r2.id === editing) ?? null;
-  const idText = draft.id.trim();
-  const id = /^\d+$/.test(idText) ? Number(idText) : NaN;
-  if (!idText) errors.id = t("Give the race's number, from 8 to 255.");
-  else if (!Number.isInteger(id)) errors.id = t("The number is a whole number from 8 to 255.");
-  else if (id < FIRST_RACE) errors.id = t("{n} is the game's own race, {race}. A mod's races are numbered 8 to 255.", { n: id, race: translate(GAME_RACES[id]) });
-  else if (id > LAST_RACE) errors.id = t("A race's number is 255 at most.");
-  else {
-    const other = rows2.find((r2) => r2.id === id && r2.id !== editing);
-    if (other) errors.id = t("Race {n} is already in the table, as {name}.", { n: id, name: other.name });
-  }
-  const name = draft.name.trim();
-  if (!name) errors.name = t("Give the race a name.");
-  else if (name.length > RACE_NAME_MAX) errors.name = t("A name is 40 characters at most; this one has {n}.", { n: name.length });
-  const letter = draft.letter.trim().toLowerCase();
-  if (letter && !/^[a-z]$/.test(letter)) errors.letter = t("The letter is one letter from a to z, or none.");
-  else if (letter && GAME_LETTERS[letter] && letter !== was?.letter) errors.letter = t("{letter} is the letter of the game's own files for {race}.", { letter, race: translate(GAME_LETTERS[letter]) });
-  if (Object.keys(errors).length) return { row: null, errors };
-  const row = { ...was ?? {}, id, name };
-  delete row.letter;
-  delete row.like;
-  if (letter) row.letter = letter;
-  if (draft.like === "0" || draft.like === "1" || draft.like === "2") row.like = Number(draft.like);
-  return { row, errors };
-}
-var RaceTable = class {
-  host;
-  rows;
-  constructor(host, initial = []) {
-    this.host = host;
-    this.rows = normalizeRaces(initial);
-  }
-  /** Whether the editor keeps race names (an editor from before them cannot). */
-  get canKeep() {
-    return typeof this.host.gameData.setRaces === "function";
-  }
-  /** Whether the editor can suggest names and letters from the mod's files, now. */
-  get canHint() {
-    return typeof this.host.gameData.raceCandidates === "function" && this.host.ours();
-  }
-  /** Takes the editor's table for the mod, when it draws from the mod. Whether anything changed. */
-  load() {
-    const g = this.host.gameData;
-    if (typeof g.races !== "function" || !this.host.ours()) return false;
-    const next = normalizeRaces(g.races());
-    if (sameRaces(next, this.rows)) return false;
-    this.rows = next;
-    return true;
-  }
-  /** Adds a row, or replaces the row `editing`; refused (with the reasons) as `checkRow` says. */
-  put(draft, editing = null) {
-    if (!this.canKeep) return { ok: false, errors: {} };
-    const { row, errors } = checkRow(draft, this.rows, editing);
-    if (!row) return { ok: false, errors };
-    this.keep([...this.rows.filter((r2) => r2.id !== editing), row]);
-    return { ok: true, errors };
-  }
-  remove(id) {
-    if (!this.canKeep || !this.rows.some((r2) => r2.id === id)) return false;
-    this.keep(this.rows.filter((r2) => r2.id !== id));
-    return true;
-  }
-  /** The editor's suggestions, for a person to choose from; empty when it gives none. Never written into a row here. */
-  async hints() {
-    const g = this.host.gameData;
-    if (!this.canHint) return { names: [], letters: [] };
-    try {
-      const got = await g.raceCandidates();
-      const taken = new Set(this.rows.map((r2) => r2.name.toLowerCase())), letters = new Set(this.rows.map((r2) => r2.letter));
-      return {
-        names: [...new Set((got?.names ?? []).filter((n) => typeof n === "string" && n.trim()).map((n) => n.trim()))].filter((n) => !taken.has(n.toLowerCase())),
-        letters: (got?.letters ?? []).filter((l) => typeof l === "string" && /^[a-z]$/.test(l) && !GAME_LETTERS[l] && !letters.has(l))
-      };
-    } catch {
-      return { names: [], letters: [] };
-    }
-  }
-  keep(rows2) {
-    this.rows = normalizeRaces(rows2);
-    const id = this.host.profileId();
-    if (id) this.host.gameData.setRaces?.(this.rows, id);
-  }
-};
-var Refusal = class {
-  said = null;
-  say;
-  unsay;
-  constructor(say, unsay) {
-    this.say = say;
-    this.unsay = unsay;
-  }
-  refuse(text) {
-    this.said = text;
-    this.say(text);
-  }
-  /** The row changed (a field typed in, a hint taken, Cancel, another row chosen, a row kept). */
-  changed() {
-    if (this.said === null) return;
-    const text = this.said;
-    this.said = null;
-    this.unsay(text);
-  }
-};
-var racesApi = (gameData) => gameData;
-
-// source.ts
-var SYSTEM_FILES = {
-  names: ["desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store", "icon\r", ".directory"],
-  prefixes: ["._"],
-  folders: ["__macosx"]
-};
-function isSystemFile(path) {
-  const parts = path.toLowerCase().split(/[\\/]/).filter(Boolean);
-  const name = parts.pop() ?? "";
-  return SYSTEM_FILES.names.includes(name) || SYSTEM_FILES.prefixes.some((p) => name.startsWith(p)) || parts.some((folder) => SYSTEM_FILES.folders.includes(folder));
-}
-var GAME_ARCHIVES = ["stardat.mpq", "broodat.mpq", "patch_rt.mpq", "starcraft.mpq", "broodwar.mpq"];
-function gameCopyFiles(paths) {
-  const dir = (p) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
-  const leaf2 = (p) => p.slice(p.lastIndexOf("/") + 1).toLowerCase();
-  const copies = new Set(paths.filter((p) => leaf2(p) === "stardat.mpq").map((p) => dir(p).toLowerCase()));
-  const out = /* @__PURE__ */ new Set();
-  if (!copies.size) return out;
-  for (const p of paths) {
-    if (copies.has(dir(p).toLowerCase()) && GAME_ARCHIVES.includes(leaf2(p))) {
-      out.add(p);
-      continue;
-    }
-    for (const c2 of copies) if (p.toLowerCase().startsWith(c2 ? `${c2}/maps/` : "maps/")) {
-      out.add(p);
-      break;
-    }
-  }
-  return out;
-}
-function gameCopies(gameCopy) {
-  const dir = (p) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
-  const name = (p) => p.slice(p.lastIndexOf("/") + 1);
-  const folders = [...new Set(gameCopy.filter((p) => name(p).toLowerCase() === "stardat.mpq").map(dir))].sort((a2, b) => b.length - a2.length);
-  const rank = (p) => {
-    const i2 = GAME_ARCHIVES.indexOf(name(p).toLowerCase());
-    return i2 < 0 ? GAME_ARCHIVES.length : i2;
-  };
-  const by = /* @__PURE__ */ new Map();
-  for (const p of gameCopy) {
-    const folder = folders.find((f) => !f || p.toLowerCase().startsWith(`${f.toLowerCase()}/`)) ?? dir(p);
-    by.set(folder, [...by.get(folder) ?? [], p]);
-  }
-  return [...by].sort(([a2], [b]) => a2 < b ? -1 : a2 > b ? 1 : 0).map(([folder, paths]) => ({
-    folder,
-    names: paths.sort((a2, b) => rank(a2) - rank(b) || (a2 < b ? -1 : a2 > b ? 1 : 0)).map(name)
-  }));
-}
-var OpenError = class extends Error {
-};
-function emptySource(kind, name) {
-  return { kind, name, layers: [], files: /* @__PURE__ */ new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null, races: [] };
-}
-function probeNames(archive) {
-  const names = /* @__PURE__ */ new Set();
-  for (const t2 of DAT_TABLES) {
-    names.add(DAT_SCHEMAS[t2].file);
-    names.add(`${DAT_SCHEMAS[t2].file}ex`);
-  }
-  for (const n of ["rez\\stat_txt.tbl", "rez\\unitnames.tbl", "arr\\images.tbl", "arr\\sfxdata.tbl", "arr\\portdata.tbl", "arr\\mapdata.tbl", "scripts\\iscript.bin", "scripts\\aiscript.bin", "scripts\\bwscript.bin", "unit\\cmdbtns\\cmdicons.grp", "unit\\cmdbtns\\ticon.pcx", "unit\\cmdbtns\\uniticons.grp", "game\\tunit.pcx", "game\\tselect.pcx", "game\\tminimap.pcx", "game\\tblink.pcx"]) names.add(n);
-  for (const t2 of ["badlands", "platform", "install", "ashworld", "jungle", "desert", "ice", "twilight"]) for (const ext of ["cv5", "vf4", "vr4", "vx4", "vx4ex", "wpe", "grp", "dddata.dat"]) names.add(ext.includes(".") ? `tileset\\${t2}\\${ext}` : `tileset\\${t2}.${ext}`);
-  for (const [tbl, under] of [["arr\\images.tbl", "unit\\"], ["arr\\sfxdata.tbl", "sound\\"]]) {
-    try {
-      for (const s of decodeTblFile(archive.readFile(tbl)).strings) {
-        const p = entryText(s);
-        if (p) names.add(under + p);
-      }
-    } catch {
-    }
-  }
-  return [...names].filter((n) => {
-    try {
-      return !!archive.fileInfo(n);
-    } catch {
-      return false;
-    }
-  });
-}
-var leaf = (p) => p.split("/").pop();
-async function openPieces(pieces, name, base = null) {
-  if (!pieces.length) throw new OpenError(t("Nothing was handed over."));
-  const textFolder2 = await findTextFolder(pieces);
-  if (textFolder2) return openTextFolder(textFolder2.root, textFolder2.manifest, pieces, name, base);
-  const single = pieces.length === 1 && !pieces[0].path.includes("/");
-  if (single && /\.zip$/i.test(pieces[0].path)) {
-    const bytes = await pieces[0].read();
-    if (!isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
-    let members;
-    try {
-      members = readZip(bytes);
-    } catch (e) {
-      throw new OpenError(t("{file}: {error}", { file: pieces[0].path, error: e.message }));
-    }
-    const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
-    const folder = await findTextFolder(inside);
-    if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
-  }
-  const lower = pieces[0].path.toLowerCase();
-  const kind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") ? "exe" : "archive";
-  if (single) {
-    const bytes = await pieces[0].read();
-    if (kind === "zip" && !isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
-    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(t("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: pieces[0].path }));
-    const piece = { path: pieces[0].path, size: bytes.length, read: async () => bytes };
-    return fromPieces(kind, name.replace(/\.(mpq|exe|zip)$/i, ""), [piece]);
-  }
-  return fromPieces(kind, name, pieces);
-}
-async function fromPieces(kind, name, pieces) {
-  const source = emptySource(kind, name);
-  const loose = [];
-  const archives = [];
-  let modName = null;
-  let races = [];
-  const take = async (list, depth) => {
-    const copy = depth === 0 && kind !== "folder" ? /* @__PURE__ */ new Set() : gameCopyFiles(list.map((p) => p.path));
-    for (const p of list) {
-      const l = leaf(p.path).toLowerCase();
-      if (isSystemFile(p.path)) {
-        source.left.push(p.path);
-        continue;
-      }
-      if (copy.has(p.path)) {
-        (/\.(mpq|exe|zip)$/i.test(p.path) ? source.gameCopy : source.left).push(p.path);
-        continue;
-      }
-      if (/\.(qdp|bwl)$/.test(l)) {
-        source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path });
-        continue;
-      }
-      if (/\.(fgp|fgd)$/.test(l)) {
-        source.firegraft.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path });
-        continue;
-      }
-      if (l === "mod.json" && p.path.split("/").length <= 2) {
-        try {
-          const json = JSON.parse(new TextDecoder().decode(await p.read()));
-          const n = json?.name;
-          if (typeof n === "string" && n.trim()) modName = n.trim();
-          const declared = normalizeRaces(json?.races);
-          if (declared.length) races = declared;
-        } catch {
-        }
-        continue;
-      }
-      if (!/\.(zip|mpq|exe)$/.test(l)) {
-        loose.push(p);
-        continue;
-      }
-      const bytes = await p.read();
-      if (l.endsWith(".zip") && isZip(bytes)) {
-        if (depth > 2) continue;
-        let members;
-        try {
-          members = readZip(bytes);
-        } catch (e) {
-          throw new OpenError(t("{file}: {error}", { file: p.path, error: e.message }));
-        }
-        const prefix = list.length === 1 && depth === 0 ? "" : p.path.replace(/\.zip$/i, "") + "/";
-        await take(members.map((m) => ({ path: `${prefix}${m.path}`, size: m.size, read: m.read })), depth + 1);
-      } else if (l.endsWith(".mpq") && isMpq(bytes)) {
-        try {
-          archives.push({ label: p.path, archive: Archive.open(bytes) });
-        } catch (e) {
-          throw new OpenError(t("{file} could not be opened as an archive: {error}", { file: p.path, error: e.message }));
-        }
-      } else if (l.endsWith(".exe")) {
-        const found = exeArchive(bytes);
-        if (!found) {
-          source.left.push(p.path);
-          continue;
-        }
-        try {
-          archives.push({ label: p.path, archive: Archive.open(found.archive) });
-        } catch (e) {
-          throw new OpenError(t("The archive inside {file} could not be opened: {error}", { file: p.path, error: e.message }));
-        }
-        source.exes.push({ file: p.path, kind: found.kind, at: found.at, plugins: found.plugins });
-      } else loose.push(p);
-    }
-  };
-  await take(pieces, 0);
-  for (const { label, archive } of archives) {
-    source.layers.push(label);
-    const listed = (archive.files() ?? []).filter((n) => !n.startsWith("("));
-    if (!listed.length) source.probed.push(label);
-    const seen = new Set(listed.map(gameName));
-    for (const n of [...listed, ...probeNames(archive).filter((n2) => !seen.has(gameName(n2)))]) {
-      const info = archive.fileInfo(n);
-      if (!info) continue;
-      const read = async () => archive.readFile(n);
-      const key = gameName(n);
-      if (isSystemFile(key)) continue;
-      if (/\.(qdp|bwl)$/.test(key)) {
-        source.plugins.push({ name: n.split("\\").pop(), bytes: info.uncompressedSize, read, member: n, layer: label });
-        continue;
-      }
-      if (/\.(fgp|fgd)$/.test(key)) {
-        source.firegraft.push({ name: n.split("\\").pop(), bytes: info.uncompressedSize, read, member: n, layer: label });
-        continue;
-      }
-      source.files.set(key, { name: n, size: info.uncompressedSize, read, layer: label });
-    }
-  }
-  const root = modRoot(loose.map((p) => p.path));
-  const layer = root ? `${root}/` : "./";
-  if (loose.some((p) => !root || p.path.startsWith(root + "/"))) source.layers.push(layer);
-  for (const p of loose) {
-    if (root && !p.path.startsWith(root + "/")) {
-      source.left.push(p.path);
-      continue;
-    }
-    const rel = root ? p.path.slice(root.length + 1) : p.path;
-    if (!rel.includes("/")) {
-      source.left.push(p.path);
-      continue;
-    }
-    const key = gameName(rel);
-    const was = source.files.get(key);
-    if (was && was.layer === layer) source.duplicates.push(`${was.name} and ${rel.replace(/\//g, "\\")}`);
-    source.files.set(key, { name: rel.replace(/\//g, "\\"), size: p.size, read: p.read, layer });
-  }
-  if (kind === "folder" && source.exes.length === 1) source.name = leaf(source.exes[0].file).replace(/\.exe$/i, "");
-  if (modName) source.name = modName;
-  source.races = races;
-  source.gameCopy.sort((a2, b) => a2 < b ? -1 : a2 > b ? 1 : 0);
-  const underGameFolder = (path) => path.toLowerCase().split("/").slice(0, -1).some((f) => f !== "maps" && GAME_FOLDERS.includes(f));
-  if (source.gameCopy.length && !archives.length && !source.plugins.length && !source.firegraft.length && !loose.some((p) => underGameFolder(p.path))) {
-    throw new OpenError(gameCopies(source.gameCopy).map((c2) => t("{folder} is a copy of the game, and there is no mod in it.", { folder: c2.folder || name })).join(" "));
-  }
-  return source;
-}
-async function findTextFolder(pieces) {
-  for (const p of pieces) {
-    const parts = p.path.split("/");
-    if (parts[parts.length - 1] !== "mod.json" || parts.length > 2) continue;
-    let manifest = null;
-    try {
-      manifest = readManifest(new TextDecoder().decode(await p.read()));
-    } catch (e) {
-      throw new OpenError(e.message);
-    }
-    if (manifest) return { root: parts.slice(0, -1).join("/"), manifest };
-  }
-  return null;
-}
-async function openTextFolder(root, manifest, pieces, name, base) {
-  const source = emptySource("mod folder", manifest.name || name);
-  source.manifest = manifest;
-  source.races = normalizeRaces(manifest.races);
-  source.layers.push(root ? `${root}/` : "./");
-  const inside = pieces.filter((p) => !root || p.path.startsWith(root + "/")).map((p) => ({ ...p, path: root ? p.path.slice(root.length + 1) : p.path }));
-  let names;
-  const ctx = () => ({ manifest, names });
-  const packed2 = /* @__PURE__ */ new Map();
-  const pack = (p) => {
-    let got = packed2.get(p.path);
-    if (!got) {
-      got = p.read().then((data) => packFile(p.path, data, ctx()));
-      packed2.set(p.path, got);
-    }
-    return got;
-  };
-  for (const p of inside) {
-    if (p.path === MOD_MANIFEST) continue;
-    if (isSystemFile(p.path)) {
-      source.left.push(p.path);
-      continue;
-    }
-    const of = memberOf(p.path, manifest);
-    if (!of) {
-      source.left.push(p.path);
-      continue;
-    }
-    if (of.form === "plugin" || of.form === "firegraft") {
-      const member = of.members[0];
-      const read = async () => (await pack(p))[0].data;
-      (of.form === "plugin" ? source.plugins : source.firegraft).push({ name: leaf(p.path), bytes: p.size, read, member, layer: source.layers[0] });
-      continue;
-    }
-    for (const member of of.form === "ai" ? of.members : [of.members[0]]) {
-      const read = async () => {
-        const got = (await pack(p)).find((m) => gameName(m.member) === gameName(member));
-        if (!got) throw new OpenError(t("{file} gave no {member}.", { file: p.path, member }));
-        return got.data;
-      };
-      source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path });
-    }
-  }
-  if (manifest.names !== "none" && [...source.files.keys()].some((k) => /^scripts\\(aiscript|bwscript)\.bin$/.test(k))) {
-    const read = async (member) => {
-      const f = source.files.get(gameName(member));
-      if (f) return f.read();
-      return manifest.names === "game" && base ? base(member) : null;
-    };
-    const tables2 = {};
-    for (const t2 of DAT_TABLES) {
-      for (const member of [`${DAT_SCHEMAS[t2].file}ex`, DAT_SCHEMAS[t2].file]) {
-        const bytes = await read(member);
-        if (bytes) {
-          tables2[t2] = decodeDat(datTableOf(member), bytes, { fileName: member });
-          break;
-        }
-      }
-    }
-    const tbl = async (member) => {
-      const b = await read(member);
-      return b ? decodeTblFile(b).strings : null;
-    };
-    names = namesOf(tables2, { stat: await tbl("rez\\stat_txt.tbl"), unitnames: await tbl("rez\\unitnames.tbl"), images: await tbl("arr\\images.tbl"), sfxdata: await tbl("arr\\sfxdata.tbl"), portdata: null, mapdata: null });
-  }
-  return source;
-}
-function looksLikeMod(paths) {
-  return paths.some((p) => /^[^/]+\/([^/]+\/)?(arr\/[^/]+\.dat(ex)?|scripts\/[^/]+\.bin|rez\/[^/]+\.tbl|unit\/.+\.grp)$/i.test(p) || /^[^/]+\/mod\.json$/i.test(p));
-}
-
 // info.ts
-var MOD_KINDS = ["tables", "scripts", "pictures", "sounds", "terrain", "strings", "AI", "maps", "other"];
-function kindOf(name) {
-  const lower = gameName(name);
-  const [top] = lower.split("\\");
-  if (/^scripts\\(aiscript|bwscript)\.bin$/.test(lower)) return "AI";
-  if (top === "scripts") return "scripts";
-  if (top === "arr") return lower.endsWith(".tbl") ? "strings" : /\.dat(ex)?$/.test(lower) ? "tables" : "other";
-  if (top === "tileset") return "terrain";
-  if (top === "maps" || /\.sc[mx]$/.test(lower)) return "maps";
-  if (/\.(wav|ogg)$/.test(lower) || top === "sound" || top === "music") return "sounds";
-  if (lower.endsWith(".tbl") || top === "font") return "strings";
-  if (/\.(grp|pcx|lo[a-z]|dds|anim|smk|spk|bmp|png)$/.test(lower) || ["unit", "game", "dlgs", "cursor", "portrait"].includes(top)) return "pictures";
-  return "other";
-}
 function summarize(source) {
   const kinds = {};
   let bytes = 0;
@@ -14960,10 +17119,9 @@ function summarize(source) {
     const k = kindOf(f.name);
     kinds[k] = (kinds[k] ?? 0) + 1;
     bytes += f.size;
-    const table = /^arr\\[^\\]+\.dat(?:ex)?$/.test(gameName(f.name)) ? datTableOf(f.name) : null;
-    if (!table || source.kind === "mod folder") continue;
-    const shape = datShape(table, f.size, f.name);
-    if (shape && shape.layout !== "dat") extended.push({ member: f.name, entries: shape.count, layout: shape.layout });
+    if (source.kind === "mod folder") continue;
+    const shape = tableShape(f.name, f.size);
+    if (shape?.extended && shape.entries !== null && (shape.layout === "expanded" || shape.layout === "datex")) extended.push({ member: f.name, entries: shape.entries, layout: shape.layout });
   }
   extended.sort((a2, b) => a2.member < b.member ? -1 : 1);
   return { files: source.files.size, bytes, kinds, extended };
@@ -15027,10 +17185,7 @@ function foundLine(source) {
   return parts.join(" ");
 }
 function gameCopyNotice(source) {
-  return gameCopies(source.gameCopy).map(({ folder, names }) => {
-    const list = names.slice(0, 6).join(", ") + (names.length > 6 ? ` ${t("and {n} more", { n: num2(names.length - 6) })}` : "");
-    return t("{folder} is a copy of the game. Its own archives ({list}) are not part of the mod and were left out.", { folder: folder || source.name, list });
-  }).join(" ");
+  return gameCopyText(source.gameCopy, source.name).map(modWords).join(" ");
 }
 
 // ko.ts
@@ -15184,7 +17339,6 @@ var KO = {
   "Text": "\uD14D\uC2A4\uD2B8",
   "The animation ended.": "\uC560\uB2C8\uBA54\uC774\uC158\uC774 \uB05D\uB0AC\uC2B5\uB2C8\uB2E4.",
   "The animation of the script at the cursor, for the first image that uses it.": "\uCEE4\uC11C\uAC00 \uC788\uB294 \uC2A4\uD06C\uB9BD\uD2B8\uC758 \uC560\uB2C8\uBA54\uC774\uC158\uC744, \uADF8\uAC83\uC744 \uC4F0\uB294 \uCCAB \uC774\uBBF8\uC9C0\uB85C \uBCF4\uC5EC \uC90D\uB2C8\uB2E4.",
-  "The archive inside {file} could not be opened: {error}": "{file} \uC548\uC758 \uC544\uCE74\uC774\uBE0C\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The browser did not open the play page's tab. Allow pop-ups for this page and press Play again.": "\uBE0C\uB77C\uC6B0\uC800\uAC00 \uD50C\uB808\uC774 \uD398\uC774\uC9C0 \uD0ED\uC744 \uC5F4\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uC774 \uD398\uC774\uC9C0\uC758 \uD31D\uC5C5\uC744 \uD5C8\uC6A9\uD558\uACE0 \uB2E4\uC2DC \uD50C\uB808\uC774\uB97C \uB204\uB974\uC138\uC694.",
   "The code editor could not be loaded: {error}": "\uCF54\uB4DC \uD3B8\uC9D1\uAE30\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The editor is not drawing from this mod now.": "\uD3B8\uC9D1\uAE30\uB294 \uC9C0\uAE08 \uC774 \uBAA8\uB4DC\uC758 \uD30C\uC77C\uB85C \uADF8\uB9AC\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
@@ -15249,15 +17403,11 @@ var KO = {
   "{field} holds a whole number from 0 to {max} ({type}).": "{field}\uC5D0\uB294 0\uBD80\uD130 {max}\uAE4C\uC9C0\uC758 \uC815\uC218\uAC00 \uB4E4\uC5B4\uAC11\uB2C8\uB2E4 ({type}).",
   "{field} is in parts: {parts}.": "{field}\uB294 \uC5EC\uB7EC \uBD80\uBD84\uC73C\uB85C \uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4: {parts}.",
   "{file} cannot be shown as text: {why}": "{file|\uC744} \uD14D\uC2A4\uD2B8\uB85C \uBCF4\uC77C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: {why}",
-  "{file} could not be opened as an archive: {error}": "{file|\uC744} \uC544\uCE74\uC774\uBE0C\uB85C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "{file} does not play here: {error}": "{file|\uC740} \uC5EC\uAE30\uC11C \uC7AC\uC0DD\uB418\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4: {error}",
   "{file} entry {n} changed.": "{file} \uD56D\uBAA9 {n|\uC744} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
   "{file} gave no {member}.": "{file}\uC5D0\uC11C {member|\uC774} \uB098\uC624\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
   "{file} is in neither the mod nor the game's files here.": "{file|\uC740} \uBAA8\uB4DC\uC5D0\uB3C4 \uC5EC\uAE30 \uC788\uB294 \uAC8C\uC784 \uD30C\uC77C\uC5D0\uB3C4 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "{file} is not a mod: not an MPQ, a self-executing exe or a zip.": "{file|\uC740} \uBAA8\uB4DC\uAC00 \uC544\uB2D9\uB2C8\uB2E4: MPQ\uB3C4, \uC790\uB3D9 \uC2E4\uD589 exe\uB3C4, zip\uB3C4 \uC544\uB2D9\uB2C8\uB2E4.",
-  "{file} is not a zip.": "{file|\uC740} zip\uC774 \uC544\uB2D9\uB2C8\uB2E4.",
-  "{folder} is a copy of the game. Its own archives ({list}) are not part of the mod and were left out.": "{folder|\uC740} \uAC8C\uC784\uC758 \uC0AC\uBCF8\uC785\uB2C8\uB2E4. \uAC8C\uC784 \uC790\uCCB4\uC758 \uC544\uCE74\uC774\uBE0C({list})\uB294 \uBAA8\uB4DC\uAC00 \uC544\uB2C8\uBBC0\uB85C \uC81C\uC678\uD588\uC2B5\uB2C8\uB2E4.",
-  "{folder} is a copy of the game, and there is no mod in it.": "{folder|\uC740} \uAC8C\uC784\uC758 \uC0AC\uBCF8\uC774\uACE0, \uADF8 \uC548\uC5D0 \uBAA8\uB4DC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "{file} is not read as a GRP: {error}": "{file|\uC744} GRP\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "{file} is not read as a PNG: {error}": "{file|\uC744} PNG\uB85C \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "{file} is {w} \xD7 {h}: fewer cells than the GRP's {n} frames of {fw} \xD7 {fh}.": "{file|\uC740} {w} \xD7 {h}\uC785\uB2C8\uB2E4: {fw} \xD7 {fh} \uD504\uB808\uC784 {n}\uAC1C\uC778 GRP\uBCF4\uB2E4 \uCE78\uC774 \uC801\uC2B5\uB2C8\uB2E4.",
@@ -15265,7 +17415,6 @@ var KO = {
   "{file} replaced by {name} ({s} s{converted}){shared}.": "{file|\uC744} {name|\uC73C\uB85C} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4 ({s}\uCD08{converted}){shared}.",
   "{file}, line {line}": "{file}, {line}\uBC88 \uC904",
   "{file}: every frame replaced from {png}.": "{file}: \uBAA8\uB4E0 \uD504\uB808\uC784\uC744 {png|\uC73C\uB85C} \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
-  "{file}: {error}": "{file}: {error}",
   "{file}: {lines} lines, {bytes} bytes as assembled.": "{file}: {lines}\uC904, \uC5B4\uC148\uBE14\uD558\uBA74 {bytes}\uBC14\uC774\uD2B8.",
   "{label}{hash}: the unit palette, the settings dialogs' defaults and the units drawn follow the mod's files as you edit them.": "{label}{hash}: \uC720\uB2DB \uD314\uB808\uD2B8, \uC124\uC815 \uB300\uD654 \uC0C1\uC790\uC758 \uAE30\uBCF8\uAC12, \uADF8\uB824\uC9C0\uB294 \uC720\uB2DB\uC774 \uD3B8\uC9D1\uD558\uB294 \uB300\uB85C \uBAA8\uB4DC\uC758 \uD30C\uC77C\uC744 \uB530\uB985\uB2C8\uB2E4.",
   "{message}. The script keeps its last text that assembled.": "{message}. \uC2A4\uD06C\uB9BD\uD2B8\uB294 \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC5B4\uC148\uBE14\uB41C \uD14D\uC2A4\uD2B8\uB97C \uC720\uC9C0\uD569\uB2C8\uB2E4.",
@@ -15395,6 +17544,99 @@ var KO = {
   "Race {n} added: {name}.": "\uC885\uC871 {n}\uBC88\uC744 \uCD94\uAC00\uD588\uC2B5\uB2C8\uB2E4: {name}.",
   "Race {n} changed.": "\uC885\uC871 {n}\uBC88\uC744 \uBC14\uAFE8\uC2B5\uB2C8\uB2E4.",
   "Race {n} removed: {name}.": "\uC885\uC871 {n}\uBC88\uC744 \uC9C0\uC6E0\uC2B5\uB2C8\uB2E4: {name}."
+};
+
+// modKo.ts
+var MOD_KO = {
+  "  FireGraft project {project} (from {top, select, yes {the top} other {{place}}}){database, select, none {, no database} other { with database {database}}}; lands at the game's first open of {moment} (a game's start, after the plugins' inits)": "  FireGraft \uD504\uB85C\uC81D\uD2B8 {project} ({top, select, yes {\uB9E8 \uC704} other {{place}}}\uC5D0\uC11C){database, select, none {, \uB370\uC774\uD130\uBCA0\uC774\uC2A4 \uC5C6\uC74C} other {, \uB370\uC774\uD130\uBCA0\uC774\uC2A4 {database}}}; \uAC8C\uC784\uC774 {moment}\uC744(\uB97C) \uCC98\uC74C \uC5F4 \uB54C \uC801\uC6A9 (\uAC8C\uC784 \uC2DC\uC791 \uC2DC, \uD50C\uB7EC\uADF8\uC778 \uCD08\uAE30\uD654 \uB4A4)",
+  "  none": "  \uC5C6\uC74C",
+  "  the game files after laying: {files}": "  \uAE50 \uB4A4\uC758 \uAC8C\uC784 \uD30C\uC77C: {files}",
+  "  {kind}  {top, select, yes {(the top)} other {{path}}}: {words}": "  {kind}  {top, select, yes {(\uB9E8 \uC704)} other {{path}}}: {words}",
+  "  {name}: {why}": "  {name}: {why}",
+  "  {n}. {kind} {top, select, yes {(the top)} other {{path}}}{at, select, none {} other { at byte {at}}}  priority {priority} by {by}{replaces, select, none {} other {, in place of the game's {replaces}}}: {files, plural, one {# file} other {# files}}{probed, select, yes { (no list: found by name)} other {}}": "  {n}. {kind} {top, select, yes {(\uB9E8 \uC704)} other {{path}}}{at, select, none {} other { {at}\uBC14\uC774\uD2B8 \uC704\uCE58}}  \uC6B0\uC120\uC21C\uC704 {priority}, {by}{replaces, select, none {} other {, \uAC8C\uC784\uC758 {replaces} \uB300\uC2E0}}: \uD30C\uC77C {files, plural, other {#\uAC1C}}{probed, select, yes { (\uBAA9\uB85D \uC5C6\uC74C: \uC774\uB984\uC73C\uB85C \uCC3E\uC74C)} other {}}",
+  "  {order} {name}  {role}, entered by {entry}{samase, select, yes {; samase too} other {}}{id, select, none {} other {, id {id}}}; from {from}; {size} bytes{loaded, select, yes {} other {; not loaded: {why}}}": "  {order} {name}  {role}, \uC9C4\uC785: {entry}{samase, select, yes {; samase\uB3C4} other {}}{id, select, none {} other {, id {id}}}; \uCD9C\uCC98 {from}; {size}\uBC14\uC774\uD2B8{loaded, select, yes {} other {; \uBD88\uB7EC\uC624\uC9C0 \uC54A\uC74C: {why}}}",
+  "Chaoslauncher's (GetPluginAPI, ApplyPatchSuspended)": "Chaoslauncher\uC758 \uC778\uD130\uD398\uC774\uC2A4(GetPluginAPI, ApplyPatchSuspended)",
+  "DllMain alone": "DllMain\uB9CC",
+  "FireGraft's patcher, with {plugins, plural, one {# plugin} other {# plugins}} in its overlay and its archive": "\uC624\uBC84\uB808\uC774\uC5D0 \uD50C\uB7EC\uADF8\uC778 {plugins, plural, other {#\uAC1C}}\uC640 \uC544\uCE74\uC774\uBE0C\uAC00 \uB4E0 FireGraft \uD328\uCC98",
+  "Left out, listed but not held by its archive or not readable: {list}{more, plural, =0 {} other { and # more}}.": "\uC544\uCE74\uC774\uBE0C \uBAA9\uB85D\uC5D0\uB294 \uC788\uC9C0\uB9CC \uC548\uC5D0 \uC5C6\uAC70\uB098 \uC77D\uC744 \uC218 \uC5C6\uC5B4 \uBE8C: {list}{more, plural, =0 {} other { \uC678 #\uAC1C}}.",
+  "MPQDraft's interface (GetMPQDraftPlugin, InitializePlugin)": "MPQDraft\uC758 \uC778\uD130\uD398\uC774\uC2A4(GetMPQDraftPlugin, InitializePlugin)",
+  "MPQDraft's own patcher, which its stub loads to lay the archive and load the plugins: the mod needs what it does, not the DLL itself": "MPQDraft \uC790\uCCB4\uC758 \uD328\uCC98\uC785\uB2C8\uB2E4. \uC2A4\uD141\uC774 \uC774\uAC83\uC744 \uBD88\uB7EC \uC544\uCE74\uC774\uBE0C\uB97C \uAE54\uACE0 \uD50C\uB7EC\uADF8\uC778\uC744 \uBD88\uB7EC\uC635\uB2C8\uB2E4. \uBAA8\uB4DC\uC5D0 \uD544\uC694\uD55C \uAC83\uC740 DLL\uC774 \uC544\uB2C8\uB77C \uADF8 \uC77C\uC785\uB2C8\uB2E4",
+  "MPQDraft's self-executing MPQ, with {files, plural, one {# embedded file} other {# embedded files}} and its archive": "\uB0B4\uC7A5 \uD30C\uC77C {files, plural, other {#\uAC1C}}\uC640 \uC544\uCE74\uC774\uBE0C\uAC00 \uB4E0 MPQDraft \uC790\uCCB4 \uC2E4\uD589 MPQ",
+  "Opening {path}\u2026": "{path} \uC5EC\uB294 \uC911\u2026",
+  "Reading the mod's files: {done} of {total}\u2026": "\uBAA8\uB4DC\uC758 \uD30C\uC77C\uC744 \uC77D\uB294 \uC911: {total}\uAC1C \uC911 {done}\uAC1C\u2026",
+  "There are no game files in {name}.": "{name}\uC5D0\uB294 \uAC8C\uC784 \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "This zip is in the large-zip form (zip64), which this reader does not read: unzip it and give the folder instead.": "\uC774 zip\uC740 \uD070 zip \uD615\uC2DD(zip64)\uC774\uB77C \uC774 \uC77D\uAE30 \uB3C4\uAD6C\uB85C \uC77D\uC9C0 \uBABB\uD569\uB2C8\uB2E4. \uC555\uCD95\uC744 \uD480\uACE0 \uD3F4\uB354\uB97C \uB300\uC2E0 \uC8FC\uC138\uC694.",
+  "This zip's directory is damaged.": "\uC774 zip\uC758 \uBAA9\uB85D\uC774 \uC190\uC0C1\uB418\uC5C8\uC2B5\uB2C8\uB2E4.",
+  "This zip's directory is not at its end: it may be cut short.": "\uC774 zip\uC758 \uBAA9\uB85D\uC774 \uB05D\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4. \uD30C\uC77C\uC774 \uC798\uB838\uC744 \uC218 \uC788\uC2B5\uB2C8\uB2E4.",
+  "a file in it is packed in a way this reader does not read ({detail})": "\uC548\uC758 \uD30C\uC77C \uD558\uB098\uAC00 \uC774 \uB9AC\uB354\uAC00 \uC77D\uC9C0 \uBABB\uD558\uB294 \uBC29\uC2DD\uC73C\uB85C \uC555\uCD95\uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4({detail})",
+  "a file it needs is not in it ({detail})": "\uD544\uC694\uD55C \uD30C\uC77C\uC774 \uC548\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4({detail})",
+  "a file of plugin {id}'s, handed to it by MPQDraft's server (GetPluginModule)": "\uD50C\uB7EC\uADF8\uC778 {id}\uC758 \uD30C\uC77C. MPQDraft \uC11C\uBC84\uAC00 \uADF8 \uD50C\uB7EC\uADF8\uC778\uC5D0 \uAC74\uB135\uB2C8\uB2E4(GetPluginModule)",
+  "a library: mapped when a module imports it or asks for it": "\uB77C\uC774\uBE0C\uB7EC\uB9AC: \uBAA8\uB4C8\uC774 \uAC00\uC838\uC624\uAC70\uB098 \uC694\uCCAD\uD560 \uB54C \uC62C\uB77C\uC635\uB2C8\uB2E4",
+  "a plugin inside an archive: no loader loads one from there": "\uC544\uCE74\uC774\uBE0C \uC548\uC758 \uD50C\uB7EC\uADF8\uC778: \uAC70\uAE30\uC11C \uBD88\uB7EC\uC624\uB294 \uB85C\uB354\uB294 \uC5C6\uC2B5\uB2C8\uB2E4",
+  "a plugin that loads plugins: its folder's plugins by name (not those starting with _), its folder of files laid at {priority}": "\uD50C\uB7EC\uADF8\uC778\uC744 \uBD88\uB7EC\uC624\uB294 \uD50C\uB7EC\uADF8\uC778. \uC790\uAE30 \uD3F4\uB354\uC758 \uD50C\uB7EC\uADF8\uC778\uC744 \uC774\uB984 \uC21C\uC73C\uB85C \uBD88\uB7EC\uC624\uACE0(_\uB85C \uC2DC\uC791\uD558\uB294 \uAC83 \uC81C\uC678), \uC790\uAE30 \uD30C\uC77C \uD3F4\uB354\uB97C {priority}\uC5D0 \uAE5D\uB2C8\uB2E4",
+  "a program with an archive after it, in neither patcher's form: read as that archive": "\uB4A4\uC5D0 \uC544\uCE74\uC774\uBE0C\uAC00 \uBD99\uC740 \uD504\uB85C\uADF8\uB7A8. \uB450 \uD328\uCC98 \uD615\uC2DD \uC5B4\uB290 \uCABD\uB3C4 \uC544\uB2C8\uB77C\uC11C \uADF8 \uC544\uCE74\uC774\uBE0C\uB85C \uC77D\uC74C",
+  "a storm network provider's (SnpBind)": "storm \uB124\uD2B8\uC6CC\uD06C \uC81C\uACF5\uC790\uC758 \uC778\uD130\uD398\uC774\uC2A4(SnpBind)",
+  "a storm network provider: storm loads it only when a game between people chooses its mode, not when the mod starts": "storm \uB124\uD2B8\uC6CC\uD06C \uC81C\uACF5\uC790: \uBAA8\uB4DC\uAC00 \uC2DC\uC791\uD560 \uB54C\uAC00 \uC544\uB2C8\uB77C, \uC0AC\uB78C\uB4E4\uB07C\uB9AC \uD558\uB294 \uAC8C\uC784\uC774 \uADF8 \uBC29\uC2DD\uC744 \uACE0\uB97C \uB54C\uB9CC storm\uC774 \uBD88\uB7EC\uC635\uB2C8\uB2E4",
+  "a string table of fewer than two bytes": "2\uBC14\uC774\uD2B8\uBCF4\uB2E4 \uC9E7\uC740 \uBB38\uC790\uC5F4 \uD45C",
+  "a string table whose offsets run past its end": "\uC624\uD504\uC14B\uC774 \uB05D\uC744 \uB118\uC5B4\uAC00\uB294 \uBB38\uC790\uC5F4 \uD45C",
+  "an archive in place of the game's own {name}: the game opens it itself": "\uAC8C\uC784 \uC790\uCCB4\uC758 {name} \uC790\uB9AC\uC5D0 \uB193\uB294 \uC544\uCE74\uC774\uBE0C. \uAC8C\uC784\uC774 \uC9C1\uC811 \uC5FD\uB2C8\uB2E4",
+  "an archive, as MPQDraft's patcher lays one": "MPQDraft \uD328\uCC98\uAC00 \uAE4C\uB294 \uAC83\uACFC \uAC19\uC740 \uC544\uCE74\uC774\uBE0C",
+  "carried:": "\uD568\uAED8 \uB4E0 \uD30C\uC77C:",
+  "entry {n} of its MPQDraft file system (at byte {at}) runs past the file's end": "MPQDraft \uD30C\uC77C \uC2DC\uC2A4\uD15C\uC758 \uD56D\uBAA9 {n}({at}\uBC14\uC774\uD2B8 \uC704\uCE58)\uC774(\uAC00) \uD30C\uC77C \uB05D\uC744 \uB118\uC5B4\uAC11\uB2C8\uB2E4",
+  "files in the game's paths and plugins beside them, which no loader on Windows takes: the mod needs its files laid over the game's and its plugins loaded by name": "\uAC8C\uC784 \uACBD\uB85C\uC5D0 \uC788\uB294 \uD30C\uC77C\uACFC \uADF8 \uC606\uC758 \uD50C\uB7EC\uADF8\uC778. Windows\uC758 \uC5B4\uB5A4 \uB85C\uB354\uB3C4 \uBC1B\uC9C0 \uC54A\uC73C\uBBC0\uB85C, \uD30C\uC77C\uC744 \uAC8C\uC784 \uD30C\uC77C \uC704\uC5D0 \uAE54\uACE0 \uD50C\uB7EC\uADF8\uC778\uC744 \uC774\uB984\uC73C\uB85C \uBD88\uB7EC\uC640\uC57C \uD569\uB2C8\uB2E4",
+  "identity: hash {hash}, without plugins {withoutPlugins}; {lines} lines and {plugins} plugin lines{older, select, none {} other {; older {older}}}{beforeCode, select, none {} other {; before its code had lines {beforeCode}}}{declared, select, none {} other {; mod.json says {declared}}}; code {code, select, yes {yes} other {no}}; startup data read again {startup, select, yes {yes} other {no}}": "\uC2DD\uBCC4: \uD574\uC2DC {hash}, \uD50C\uB7EC\uADF8\uC778 \uC5C6\uC774 {withoutPlugins}; \uC904 {lines}\uAC1C\uC640 \uD50C\uB7EC\uADF8\uC778 \uC904 {plugins}\uAC1C{older, select, none {} other {; \uC774\uC804 {older}}}{beforeCode, select, none {} other {; \uCF54\uB4DC\uC5D0 \uC904\uC774 \uC0DD\uAE30\uAE30 \uC804 {beforeCode}}}{declared, select, none {} other {; mod.json\uC5D0 \uC801\uD78C \uAC12 {declared}}}; \uCF54\uB4DC {code, select, yes {\uC788\uC74C} other {\uC5C6\uC74C}}; \uC2DC\uC791 \uB370\uC774\uD130 \uB2E4\uC2DC \uC77D\uC74C {startup, select, yes {\uC608} other {\uC544\uB2C8\uC694}}",
+  "it could not be read ({detail})": "\uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4({detail})",
+  "it has no GetMPQDraftPlugin, which its loader asks for": "\uB85C\uB354\uAC00 \uCC3E\uB294 GetMPQDraftPlugin\uC774 \uC5C6\uC2B5\uB2C8\uB2E4",
+  "it is FireGraft's patcher with {plugins, plural, one {# plugin} other {# plugins}}, and no archive was found after {plugins, plural, =0 {its overlay} other {them}}": "\uD50C\uB7EC\uADF8\uC778 {plugins, plural, other {#\uAC1C}}\uAC00 \uB4E0 FireGraft \uD328\uCC98\uC778\uB370, {plugins, plural, =0 {\uC624\uBC84\uB808\uC774} other {\uD50C\uB7EC\uADF8\uC778}} \uB4A4\uC5D0\uC11C \uC544\uCE74\uC774\uBE0C\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4",
+  "it is MPQDraft's self-executing form with {files, plural, one {# embedded file} other {# embedded files}}, and no archive was found after them": "\uB0B4\uC7A5 \uD30C\uC77C {files, plural, other {#\uAC1C}}\uAC00 \uB4E0 MPQDraft \uC790\uCCB4 \uC2E4\uD589 \uD615\uC2DD\uC778\uB370, \uADF8 \uB4A4\uC5D0\uC11C \uC544\uCE74\uC774\uBE0C\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4",
+  "it is damaged ({detail})": "\uC190\uC0C1\uB418\uC5C8\uC2B5\uB2C8\uB2E4({detail})",
+  "it loads the mod's other plugins: the mod needs those plugins loaded in its order, not this plugin itself": "\uBAA8\uB4DC\uC758 \uB2E4\uB978 \uD50C\uB7EC\uADF8\uC778\uC744 \uBD88\uB7EC\uC624\uB294 \uD50C\uB7EC\uADF8\uC778\uC785\uB2C8\uB2E4. \uBAA8\uB4DC\uC5D0 \uD544\uC694\uD55C \uAC83\uC740 \uC774 \uD50C\uB7EC\uADF8\uC778\uC774 \uC544\uB2C8\uB77C \uADF8 \uD50C\uB7EC\uADF8\uC778\uB4E4\uC744 \uC21C\uC11C\uB300\uB85C \uBD88\uB7EC\uC624\uB294 \uC77C\uC785\uB2C8\uB2E4",
+  "its format version is one this reader does not read ({detail})": "\uC774 \uB9AC\uB354\uAC00 \uC77D\uC9C0 \uBABB\uD558\uB294 \uD615\uC2DD \uBC84\uC804\uC785\uB2C8\uB2E4({detail})",
+  "its loader leaves out a name that starts with _": "\uB85C\uB354\uAC00 _\uB85C \uC2DC\uC791\uD558\uB294 \uC774\uB984\uC744 \uBE8D\uB2C8\uB2E4",
+  "its loader loads .qdp files only": "\uB85C\uB354\uAC00 .qdp \uD30C\uC77C\uB9CC \uBD88\uB7EC\uC635\uB2C8\uB2E4",
+  "its patcher overlay (at byte {at}) is of form {form}; only form {known} is known": "\uD328\uCC98 \uC624\uBC84\uB808\uC774({at}\uBC14\uC774\uD2B8 \uC704\uCE58)\uC758 \uD615\uC2DD\uC774 {form}\uC785\uB2C8\uB2E4. \uC54C\uB824\uC9C4 \uD615\uC2DD\uC740 {known}\uBFD0\uC785\uB2C8\uB2E4",
+  "its patcher overlay (at byte {at}) says it holds {count} plugins, which is no number a patcher writes": "\uD328\uCC98 \uC624\uBC84\uB808\uC774({at}\uBC14\uC774\uD2B8 \uC704\uCE58)\uAC00 \uD50C\uB7EC\uADF8\uC778 {count}\uAC1C\uB97C \uB2F4\uB294\uB2E4\uACE0 \uD558\uB294\uB370, \uD328\uCC98\uAC00 \uC4F0\uB294 \uC218\uAC00 \uC544\uB2D9\uB2C8\uB2E4",
+  "its patcher overlay says it holds {count} plugins, and the file ends after {read}": "\uD328\uCC98 \uC624\uBC84\uB808\uC774\uAC00 \uD50C\uB7EC\uADF8\uC778 {count}\uAC1C\uB97C \uB2F4\uB294\uB2E4\uACE0 \uD558\uB294\uB370, \uD30C\uC77C\uC774 {read}\uAC1C \uB4A4\uC5D0\uC11C \uB05D\uB0A9\uB2C8\uB2E4",
+  "layers (by storm's priority, lowest first: laid in this order, the later winning):": "\uB808\uC774\uC5B4 (storm \uC6B0\uC120\uC21C\uC704\uAC00 \uB0AE\uC740 \uAC83\uBD80\uD130: \uC774 \uC21C\uC11C\uB85C \uAE54\uACE0 \uB098\uC911 \uAC83\uC774 \uC774\uAE40):",
+  "loaders (outermost first):": "\uB85C\uB354 (\uBC14\uAE65\uCABD\uBD80\uD130):",
+  "modules (the loader's order):": "\uBAA8\uB4C8 (\uB85C\uB354\uC758 \uC21C\uC11C):",
+  "no archive header is where it should be ({detail})": "\uC544\uCE74\uC774\uBE0C \uD5E4\uB354\uAC00 \uC788\uC5B4\uC57C \uD560 \uC790\uB9AC\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4({detail})",
+  "none: not a Windows image": "\uC5C6\uC74C: Windows \uC774\uBBF8\uC9C0\uAC00 \uC544\uB2D8",
+  "patches:": "\uD328\uCE58:",
+  "plugin {n} of its patcher overlay (at byte {at}) has {value} where every patcher seen has 0: a form this reader does not know": "\uD328\uCC98 \uC624\uBC84\uB808\uC774\uC758 \uD50C\uB7EC\uADF8\uC778 {n}({at}\uBC14\uC774\uD2B8 \uC704\uCE58)\uC5D0 {value}\uC774(\uAC00) \uC788\uC2B5\uB2C8\uB2E4. \uC9C0\uAE08\uAE4C\uC9C0 \uBCF8 \uD328\uCC98\uB294 \uBAA8\uB450 0\uC774\uC5C8\uC73C\uBBC0\uB85C, \uC774 \uC77D\uAE30 \uB3C4\uAD6C\uAC00 \uBAA8\uB974\uB294 \uD615\uC2DD\uC785\uB2C8\uB2E4",
+  "plugin {n} of its patcher overlay (at byte {at}) is no Windows library": "\uD328\uCC98 \uC624\uBC84\uB808\uC774\uC758 \uD50C\uB7EC\uADF8\uC778 {n}({at}\uBC14\uC774\uD2B8 \uC704\uCE58)\uC740(\uB294) Windows \uB77C\uC774\uBE0C\uB7EC\uB9AC\uAC00 \uC544\uB2D9\uB2C8\uB2E4",
+  "plugin {n} of its patcher overlay is {size} bytes, and the file ends {left} bytes after its start": "\uD328\uCC98 \uC624\uBC84\uB808\uC774\uC758 \uD50C\uB7EC\uADF8\uC778 {n}\uC740(\uB294) {size}\uBC14\uC774\uD2B8\uC778\uB370, \uD30C\uC77C\uC774 \uADF8 \uC2DC\uC791\uC5D0\uC11C {left}\uBC14\uC774\uD2B8 \uB4A4\uC5D0 \uB05D\uB0A9\uB2C8\uB2E4",
+  "said: {said}": "\uC54C\uB9BC: {said}",
+  "string {index} starts past the table's end": "\uBB38\uC790\uC5F4 {index}\uC774(\uAC00) \uD45C\uC758 \uB05D \uB108\uBA38\uC5D0\uC11C \uC2DC\uC791\uD568",
+  "the archive inside {path} (at byte {at}) could not be opened: {why}": "{path} \uC548\uC758 \uC544\uCE74\uC774\uBE0C({at}\uBC14\uC774\uD2B8 \uC704\uCE58)\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {reason}",
+  "the same plugin as {name}, which is that file": "{name}\uC640 \uAC19\uC740 \uD50C\uB7EC\uADF8\uC778\uC774\uACE0, \uADF8 \uD30C\uC77C\uC774 \uC774\uAC83\uC785\uB2C8\uB2E4",
+  "turned off": "\uAEBC\uC838 \uC788\uC74C",
+  "{detail}": "{detail}",
+  "{exe} ({form, select, mpqdraft-sempq {MPQDraft SEMPQ} other {FireGraft patcher}} plugin {named, select, yes {{name}, } other {}}id {id})": "{exe} ({form, select, mpqdraft-sempq {MPQDraft SEMPQ} other {FireGraft \uD328\uCC98}} \uD50C\uB7EC\uADF8\uC778 {named, select, yes {{name}, } other {}}id {id})",
+  "{folder} is a copy of the game, and there is no mod in it.": "{folder|\uC740} \uAC8C\uC784 \uC0AC\uBCF8\uC774\uACE0, \uADF8 \uC548\uC5D0 \uBAA8\uB4DC\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
+  "{folder} is a copy of the game. Its own archives ({list}{more, plural, =0 {} other { and # more}}) are not part of the mod and were left out.": "{folder|\uC740} \uAC8C\uC784 \uC0AC\uBCF8\uC785\uB2C8\uB2E4. \uADF8 \uC548\uC758 \uAC8C\uC784 \uC544\uCE74\uC774\uBE0C({list}{more, plural, =0 {} other { \uC678 #\uAC1C}})\uB294 \uBAA8\uB4DC\uAC00 \uC544\uB2C8\uB77C\uC11C \uBE90\uC2B5\uB2C8\uB2E4.",
+  "{loader}'s own packing of its folder of files, which it opens at {priority}{laid, select, yes {: the folder is laid in its place} other {}}": "{loader}\uAC00 \uC790\uAE30 \uD30C\uC77C \uD3F4\uB354\uB97C \uBB36\uC740 \uAC83. {priority}\uC5D0 \uC5FD\uB2C8\uB2E4{laid, select, yes {. \uB300\uC2E0 \uADF8 \uD3F4\uB354\uB97C \uAE5D\uB2C8\uB2E4} other {}}",
+  "{name} could not be read from {path}": "{path}\uC5D0\uC11C {name|\uC744} \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4",
+  "{name} has no source to read it from": "{name|\uC744} \uC77D\uC5B4 \uC62C \uACF3\uC774 \uC5C6\uC2B5\uB2C8\uB2E4",
+  "{name} is given more than once, in another case ({paths}): the last is used.": "{name|\uC774} \uB300\uC18C\uBB38\uC790\uB9CC \uB2EC\uB9AC \uC5EC\uB7EC \uBC88 \uC788\uC2B5\uB2C8\uB2E4({paths}). \uB9C8\uC9C0\uB9C9 \uAC83\uC744 \uC501\uB2C8\uB2E4.",
+  "{name} is inside an archive ({archive}): no loader loads it from there": "{name|\uC740} \uC544\uCE74\uC774\uBE0C({archive}) \uC548\uC5D0 \uC788\uC2B5\uB2C8\uB2E4. \uAC70\uAE30\uC11C \uBD88\uB7EC\uC624\uB294 \uB85C\uB354\uB294 \uC5C6\uC2B5\uB2C8\uB2E4",
+  "{name}: its archive {archive} is not among the mod's": "{name}: \uADF8 \uC544\uCE74\uC774\uBE0C {archive|\uC740} \uBAA8\uB4DC\uC758 \uAC83\uC774 \uC544\uB2D9\uB2C8\uB2E4",
+  "{name}{link, select, none {} other { <{link}>}}{races, select, none {} other {; races {races}}}": "{name}{link, select, none {} other { <{link}>}}{races, select, none {} other {; \uC885\uC871 {races}}}",
+  "{path} cannot be read as a mod: {why}.": "{path|\uC740} \uBAA8\uB4DC\uB85C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: {why}.",
+  "{path} cannot be read as a zip: {why}": "{path|\uC744} zip\uC73C\uB85C \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4: {why}",
+  "{path} could not be opened as an archive: {why}": "{path|\uC744} \uC544\uCE74\uC774\uBE0C\uB85C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {reason}",
+  "{path} could not be read: {why}": "{path|\uC744} \uC77D\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {why}",
+  "{path} has no list of its files; looking for the game's own names in it\u2026": "{path}\uC5D0\uB294 \uD30C\uC77C \uBAA9\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uAC8C\uC784 \uC790\uCCB4\uC758 \uC774\uB984\uC73C\uB85C \uCC3E\uB294 \uC911\u2026",
+  "{path} holds no archive: it is a program only, not a mod's patcher or self-executing archive": "{path}\uC5D0\uB294 \uC544\uCE74\uC774\uBE0C\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. \uBAA8\uB4DC\uC758 \uD328\uCC98\uB098 \uC790\uCCB4 \uC2E4\uD589 \uC544\uCE74\uC774\uBE0C\uAC00 \uC544\uB2C8\uB77C \uD504\uB85C\uADF8\uB7A8\uC77C \uBFD0\uC785\uB2C8\uB2E4",
+  "{path} is encrypted in this zip, and encrypted zips are not read.": "\uC774 zip\uC5D0\uC11C {path|\uC740} \uC554\uD638\uD654\uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4. \uC554\uD638\uD654\uB41C zip\uC740 \uC77D\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.",
+  "{path} is not JSON that can be read: left out.": "{path|\uC740} \uC77D\uC744 \uC218 \uC788\uB294 JSON\uC774 \uC544\uB2C8\uB77C\uC11C \uBE90\uC2B5\uB2C8\uB2E4.",
+  "{path} is not among {name}'s files": "{path|\uC740} {name}\uC758 \uD30C\uC77C\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4",
+  "{path} is packed in a way this reader does not read (method {method}): only stored and deflated members are read.": "{path|\uC740} \uC774 \uC77D\uAE30 \uB3C4\uAD6C\uAC00 \uC77D\uC9C0 \uBABB\uD558\uB294 \uBC29\uC2DD(method {method})\uC73C\uB85C \uC555\uCD95\uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4. \uC800\uC7A5(stored)\uACFC deflate\uB85C \uC555\uCD95\uB41C \uD56D\uBAA9\uB9CC \uC77D\uC2B5\uB2C8\uB2E4.",
+  "{path} is {loader}'s own packing of its folder of files (it names it): the folder is laid in its place, at {priority}.": "{path|\uC740} {loader}\uAC00 \uC790\uAE30 \uD30C\uC77C \uD3F4\uB354\uB97C \uBB36\uC740 \uAC83\uC785\uB2C8\uB2E4(\uC774\uB984\uC744 \uAC00\uB9AC\uD0B5\uB2C8\uB2E4). \uB300\uC2E0 \uADF8 \uD3F4\uB354\uB97C {priority}\uC5D0 \uAE5D\uB2C8\uB2E4.",
+  "{path} says this is a mod folder in text form (format {format}): its texts and pictures are packed into the game's files before it can be read as a mod.": "{path}\uC5D0 \uB530\uB974\uBA74 \uC774\uAC83\uC740 \uD14D\uC2A4\uD2B8 \uD615\uC2DD\uC758 \uBAA8\uB4DC \uD3F4\uB354(\uD615\uC2DD {format})\uC785\uB2C8\uB2E4. \uBAA8\uB4DC\uB85C \uC77D\uC73C\uB824\uBA74 \uBA3C\uC800 \uD14D\uC2A4\uD2B8\uC640 \uADF8\uB9BC\uC744 \uAC8C\uC784 \uD30C\uC77C\uB85C \uBB36\uC5B4\uC57C \uD569\uB2C8\uB2E4.",
+  "{path}: inflated to {got} bytes, where the zip says {size}.": "{path}: \uD480\uC5C8\uB354\uB2C8 {got}\uBC14\uC774\uD2B8\uC778\uB370, zip\uC5D0\uB294 {size}\uBC14\uC774\uD2B8\uB77C\uACE0 \uB418\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.",
+  "{path}: its packed bytes could not be inflated ({detail}).": "{path}: \uC555\uCD95\uB41C \uB0B4\uC6A9\uC744 \uD480\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4({detail}).",
+  "{path}: its place in the zip is damaged.": "{path}: zip \uC548\uC758 \uC704\uCE58\uAC00 \uC190\uC0C1\uB418\uC5C8\uC2B5\uB2C8\uB2E4."
 };
 
 // monaco.ts
@@ -15592,6 +17834,374 @@ function attachReader(files) {
     const member = file?.member ? gameName(file.member) : null;
     return member && files.has(member) ? files.read(member) : null;
   };
+}
+
+// races.ts
+var FIRST_RACE = 8;
+var LAST_RACE = 255;
+var RACE_NAME_MAX = MAX_RACE_NAME;
+var GAME_RACES = [msg2("Zerg"), msg2("Terran"), msg2("Protoss"), msg2("Independent"), msg2("Neutral"), msg2("User Selectable"), msg2("Random"), msg2("Inactive")];
+var GAME_LETTERS = { z: msg2("Zerg"), t: msg2("Terran"), p: msg2("Protoss"), n: msg2("Neutral") };
+function sameRaces(a2, b) {
+  return a2.length === b.length && a2.every((r2, i2) => r2.id === b[i2].id && r2.name === b[i2].name && r2.letter === b[i2].letter && r2.like === b[i2].like);
+}
+var emptyDraft = () => ({ id: "", name: "", letter: "", like: "" });
+var draftOf = (r2) => ({ id: String(r2.id), name: r2.name, letter: r2.letter ?? "", like: r2.like === void 0 ? "" : String(r2.like) });
+function checkRow(draft, rows2, editing) {
+  const errors = {};
+  const was = editing === null ? null : rows2.find((r2) => r2.id === editing) ?? null;
+  const idText = draft.id.trim();
+  const id = /^\d+$/.test(idText) ? Number(idText) : NaN;
+  if (!idText) errors.id = t("Give the race's number, from 8 to 255.");
+  else if (!Number.isInteger(id)) errors.id = t("The number is a whole number from 8 to 255.");
+  else if (id < FIRST_RACE) errors.id = t("{n} is the game's own race, {race}. A mod's races are numbered 8 to 255.", { n: id, race: translate(GAME_RACES[id]) });
+  else if (id > LAST_RACE) errors.id = t("A race's number is 255 at most.");
+  else {
+    const other = rows2.find((r2) => r2.id === id && r2.id !== editing);
+    if (other) errors.id = t("Race {n} is already in the table, as {name}.", { n: id, name: other.name });
+  }
+  const name = draft.name.trim();
+  if (!name) errors.name = t("Give the race a name.");
+  else if (name.length > RACE_NAME_MAX) errors.name = t("A name is 40 characters at most; this one has {n}.", { n: name.length });
+  const letter = draft.letter.trim().toLowerCase();
+  if (letter && !/^[a-z]$/.test(letter)) errors.letter = t("The letter is one letter from a to z, or none.");
+  else if (letter && GAME_LETTERS[letter] && letter !== was?.letter) errors.letter = t("{letter} is the letter of the game's own files for {race}.", { letter, race: translate(GAME_LETTERS[letter]) });
+  if (Object.keys(errors).length) return { row: null, errors };
+  const row = { ...was ?? {}, id, name };
+  delete row.letter;
+  delete row.like;
+  if (letter) row.letter = letter;
+  if (draft.like === "0" || draft.like === "1" || draft.like === "2") row.like = Number(draft.like);
+  return { row, errors };
+}
+var RaceTable = class {
+  host;
+  rows;
+  constructor(host, initial = []) {
+    this.host = host;
+    this.rows = normalizeRaces(initial);
+  }
+  /** Whether the editor keeps race names (an editor from before them cannot). */
+  get canKeep() {
+    return typeof this.host.gameData.setRaces === "function";
+  }
+  /** Whether the editor can suggest names and letters from the mod's files, now. */
+  get canHint() {
+    return typeof this.host.gameData.raceCandidates === "function" && this.host.ours();
+  }
+  /** Takes the editor's table for the mod, when it draws from the mod. Whether anything changed. */
+  load() {
+    const g = this.host.gameData;
+    if (typeof g.races !== "function" || !this.host.ours()) return false;
+    const next = normalizeRaces(g.races());
+    if (sameRaces(next, this.rows)) return false;
+    this.rows = next;
+    return true;
+  }
+  /** Adds a row, or replaces the row `editing`; refused (with the reasons) as `checkRow` says. */
+  put(draft, editing = null) {
+    if (!this.canKeep) return { ok: false, errors: {} };
+    const { row, errors } = checkRow(draft, this.rows, editing);
+    if (!row) return { ok: false, errors };
+    this.keep([...this.rows.filter((r2) => r2.id !== editing), row]);
+    return { ok: true, errors };
+  }
+  remove(id) {
+    if (!this.canKeep || !this.rows.some((r2) => r2.id === id)) return false;
+    this.keep(this.rows.filter((r2) => r2.id !== id));
+    return true;
+  }
+  /** The editor's suggestions, for a person to choose from; empty when it gives none. Never written into a row here. */
+  async hints() {
+    const g = this.host.gameData;
+    if (!this.canHint) return { names: [], letters: [] };
+    try {
+      const got = await g.raceCandidates();
+      const taken = new Set(this.rows.map((r2) => r2.name.toLowerCase())), letters = new Set(this.rows.map((r2) => r2.letter));
+      return {
+        names: [...new Set((got?.names ?? []).filter((n) => typeof n === "string" && n.trim()).map((n) => n.trim()))].filter((n) => !taken.has(n.toLowerCase())),
+        letters: (got?.letters ?? []).filter((l) => typeof l === "string" && /^[a-z]$/.test(l) && !GAME_LETTERS[l] && !letters.has(l))
+      };
+    } catch {
+      return { names: [], letters: [] };
+    }
+  }
+  keep(rows2) {
+    this.rows = normalizeRaces(rows2);
+    const id = this.host.profileId();
+    if (id) this.host.gameData.setRaces?.(this.rows, id);
+  }
+};
+var Refusal = class {
+  said = null;
+  say;
+  unsay;
+  constructor(say2, unsay) {
+    this.say = say2;
+    this.unsay = unsay;
+  }
+  refuse(text) {
+    this.said = text;
+    this.say(text);
+  }
+  /** The row changed (a field typed in, a hint taken, Cancel, another row chosen, a row kept). */
+  changed() {
+    if (this.said === null) return;
+    const text = this.said;
+    this.said = null;
+    this.unsay(text);
+  }
+};
+var racesApi = (gameData) => gameData;
+
+// source.ts
+var OpenError = class extends Error {
+};
+function emptySource(kind, name) {
+  const source = {
+    kind,
+    name,
+    layers: [],
+    files: /* @__PURE__ */ new Map(),
+    plugins: [],
+    firegraft: [],
+    exes: [],
+    duplicates: [],
+    left: [],
+    gameCopy: [],
+    probed: [],
+    manifest: null,
+    races: [],
+    identity: null,
+    identify: () => Promise.reject(new Error("not yet")),
+    close: () => {
+    }
+  };
+  source.identify = once(() => source.identity ? Promise.resolve(source.identity) : identityOf2(source), source);
+  return source;
+}
+function once(work, source) {
+  let made = null;
+  return () => made ??= work().then((id) => source.identity = id);
+}
+var HASH_LATER = 64 * 1024 * 1024;
+var leaf = (p) => p.split("/").pop();
+function refused(e) {
+  if (e instanceof ModError) throw new OpenError(modWords(e.detail));
+  throw e;
+}
+async function openPieces(pieces, name, base = null, progress) {
+  if (!pieces.length) throw new OpenError(t("Nothing was handed over."));
+  const textFolder2 = await findTextFolder(pieces);
+  if (textFolder2) return openTextFolder(textFolder2.root, textFolder2.manifest, pieces, name, base);
+  const single = pieces.length === 1 && !pieces[0].path.includes("/");
+  let given = pieces;
+  if (single) {
+    const bytes = await pieces[0].read();
+    given = [{ path: pieces[0].path, size: bytes.length, read: async () => bytes }];
+    if (/\.zip$/i.test(pieces[0].path) && isZip(bytes)) {
+      let members = [];
+      try {
+        members = readZip(bytes);
+      } catch (e) {
+        refused(e);
+      }
+      const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
+      const folder = await findTextFolder(inside);
+      if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
+    }
+  }
+  const byPath = new Map(given.map((p) => [p.path, p]));
+  const tree = {
+    name: single ? name.replace(/\.(mpq|exe|zip)$/i, "") : name,
+    ...single ? { named: given[0].path } : {},
+    list: async () => given.map((p) => ({ path: p.path, size: p.size })),
+    read: async (path) => byPath.get(path).read()
+  };
+  const archives = /* @__PURE__ */ new Map();
+  const later = given.reduce((n, p) => n + p.size, 0) >= HASH_LATER;
+  let d, identity;
+  try {
+    if (later) {
+      const unhashed = await readMod(tree, { progress, archives, hashFiles: false });
+      d = unhashed;
+      identity = () => modIdentity(tree, unhashed, { archives });
+    } else {
+      const hashed = await readMod(tree, { progress, archives });
+      d = hashed;
+      identity = hashed.identity;
+    }
+  } catch (e) {
+    return refused(e);
+  }
+  const copyOnly = d.said.find((m) => m.key === "copy-only");
+  if (copyOnly) throw new OpenError(modWords(copyOnly));
+  if (!d.files.length && !d.modules.length && !d.patches.length) {
+    const none = d.said.find((m) => m.key === "no-game-files");
+    throw new OpenError(single || !none ? t("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: single ? pieces[0].path : name }) : modWords(none));
+  }
+  const lower = pieces[0].path.toLowerCase();
+  const program = single && d.layers.some((l) => l.kind === "archive" && l.path === given[0].path && l.by !== "mpqdraft" && l.by !== "replacement");
+  const kind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") || program ? "exe" : "archive";
+  return fromDescription(kind, tree, d, archives, identity);
+}
+function fromDescription(kind, tree, d, archives, identity) {
+  const source = emptySource(kind, d.name);
+  if (typeof identity === "function") source.identify = once(identity, source);
+  else source.identity = identity;
+  source.races = d.races ?? [];
+  const label = (l) => l.kind === "archive" ? l.path : l.path ? `${l.path}/` : "./";
+  source.layers = d.layers.map(label);
+  source.probed = d.layers.filter((l) => l.probed).map((l) => l.path);
+  const readerOf = fileReaders(tree, d, { archives });
+  source.close = () => {
+    readerOf.close();
+    archives.clear();
+  };
+  for (const f of d.files) {
+    const l = d.layers[f.layer];
+    const name = l.kind === "archive" ? f.member : (l.path ? f.path.slice(l.path.length + 1) : f.path).replace(/\//g, "\\");
+    source.files.set(gameName(f.name), { name, size: f.size, read: readerOf(f), layer: label(l), line: f.name });
+  }
+  for (const m of d.modules) {
+    if (!hasCodeLine(m)) continue;
+    const s = m.source;
+    const line = d.identity.plugins[m.name] === m.sha256 ? m.name : void 0;
+    source.plugins.push({ name: s.kind === "file" ? s.path : m.name, bytes: m.size, read: () => moduleBytes(tree, m), layer: s.kind === "file" ? s.path : s.kind === "carried" ? s.exe : s.archive, ...line ? { line } : {} });
+  }
+  for (const c2 of d.carried) {
+    const s = c2.source;
+    if (s?.kind !== "member") continue;
+    const read = async () => {
+      const layer = d.layers.find((l) => l.kind === "archive" && l.path === s.archive);
+      const bytes = layer ? (await openLayer(tree, layer, { archives })).readFile(s.member) : null;
+      if (!bytes) throw new OpenError(t("{file} gave no {member}.", { file: s.archive, member: s.member }));
+      return bytes;
+    };
+    source.plugins.push({ name: c2.name, bytes: 0, read, member: s.member, layer: s.archive });
+  }
+  for (const f of d.patches[0]?.files ?? []) {
+    source.firegraft.push({ name: f.path ?? f.name, bytes: f.size, read: () => firegraftBytes(tree, d, f, { archives }), ...f.member ? { member: f.member } : {}, layer: f.path ?? f.archive ?? "" });
+  }
+  for (const l of d.layers) {
+    if (l.kind !== "archive" || l.by !== "firegraft-patcher" && l.by !== "mpqdraft-sempq" && l.by !== "self-executing") continue;
+    const carried = d.modules.filter((m) => m.source.kind === "carried" && m.source.exe === l.path);
+    source.exes.push({ file: l.path, kind: l.by === "firegraft-patcher" ? "firegraft" : "sempq", at: l.at ?? 0, plugins: carried.map((m) => ({ id: m.id ?? 0, size: m.size })) });
+  }
+  source.duplicates = d.duplicates.map((x3) => x3.paths.join(" and "));
+  source.left = d.left.map((x3) => x3.path);
+  source.gameCopy = d.gameCopy;
+  return source;
+}
+function gameCopies(gameCopy) {
+  return gameCopyFolders(gameCopy).map(({ folder, paths }) => ({ folder, names: paths.map(leafOf2) }));
+}
+async function findTextFolder(pieces) {
+  for (const p of pieces) {
+    const parts = p.path.split("/");
+    if (parts[parts.length - 1] !== "mod.json" || parts.length > 2) continue;
+    let manifest = null;
+    try {
+      manifest = readManifest(new TextDecoder().decode(await p.read()));
+    } catch (e) {
+      throw new OpenError(e.message);
+    }
+    if (manifest) return { root: parts.slice(0, -1).join("/"), manifest };
+  }
+  return null;
+}
+async function openTextFolder(root, manifest, pieces, name, base) {
+  const source = emptySource("mod folder", manifest.name || name);
+  source.manifest = manifest;
+  source.races = normalizeRaces(manifest.races);
+  source.layers.push(root ? `${root}/` : "./");
+  const inside = pieces.filter((p) => !root || p.path.startsWith(root + "/")).map((p) => ({ ...p, path: root ? p.path.slice(root.length + 1) : p.path }));
+  let names;
+  const ctx = () => ({ manifest, names });
+  const packed2 = /* @__PURE__ */ new Map();
+  const pack = (p) => {
+    let got = packed2.get(p.path);
+    if (!got) {
+      got = p.read().then((data) => packFile(p.path, data, ctx()));
+      packed2.set(p.path, got);
+    }
+    return got;
+  };
+  for (const p of inside) {
+    if (p.path === MOD_MANIFEST) continue;
+    if (isSystemFile(p.path)) {
+      source.left.push(p.path);
+      continue;
+    }
+    const of = memberOf(p.path, manifest);
+    if (!of) {
+      const plugin = manifest.plugins.find((c2) => !c2.member && c2.file === p.path), fg = manifest.firegraft.find((c2) => !c2.member && c2.file === p.path);
+      if (plugin) source.plugins.push({ name: plugin.name, bytes: p.size, read: p.read, layer: source.layers[0], line: plugin.name });
+      else if (fg) source.firegraft.push({ name: fg.name, bytes: p.size, read: p.read, layer: source.layers[0] });
+      else source.left.push(p.path);
+      continue;
+    }
+    if (of.form === "plugin" || of.form === "firegraft") {
+      const member = of.members[0];
+      const read = async () => (await pack(p))[0].data;
+      (of.form === "plugin" ? source.plugins : source.firegraft).push({ name: leaf(p.path), bytes: p.size, read, member, layer: source.layers[0] });
+      continue;
+    }
+    for (const member of of.form === "ai" ? of.members : [of.members[0]]) {
+      const read = async () => {
+        const got = (await pack(p)).find((m) => gameName(m.member) === gameName(member));
+        if (!got) throw new OpenError(t("{file} gave no {member}.", { file: p.path, member }));
+        return got.data;
+      };
+      source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path, line: gameName2(member) });
+    }
+  }
+  if (manifest.names !== "none" && [...source.files.keys()].some((k) => /^scripts\\(aiscript|bwscript)\.bin$/.test(k))) {
+    const read = async (member) => {
+      const f = source.files.get(gameName(member));
+      if (f) return f.read();
+      return manifest.names === "game" && base ? base(member) : null;
+    };
+    const tables2 = {};
+    for (const t2 of DAT_TABLES) {
+      for (const member of [`${DAT_SCHEMAS[t2].file}ex`, DAT_SCHEMAS[t2].file]) {
+        const bytes = await read(member);
+        if (bytes) {
+          tables2[t2] = decodeDat(datTableOf(member), bytes, { fileName: member });
+          break;
+        }
+      }
+    }
+    const tbl = async (member) => {
+      const b = await read(member);
+      return b ? decodeTblFile(b).strings : null;
+    };
+    names = namesOf(tables2, { stat: await tbl("rez\\stat_txt.tbl"), unitnames: await tbl("rez\\unitnames.tbl"), images: await tbl("arr\\images.tbl"), sfxdata: await tbl("arr\\sfxdata.tbl"), portdata: null, mapdata: null });
+  }
+  return source;
+}
+async function handedFiles(source, keys, read, nameOf) {
+  const out = [];
+  for (const k of keys) {
+    let bytes = null;
+    try {
+      bytes = await read(k);
+    } catch {
+    }
+    if (bytes) out.push({ path: gameName(nameOf(k)).replace(/\\/g, "/"), bytes });
+  }
+  for (const p of source.plugins) if (p.line) out.push({ path: `plugins/${p.line}`, bytes: await p.read() });
+  for (const p of source.firegraft) if (/\.(fgp|fgd)$/i.test(p.name)) out.push({ path: `firegraft/${leafOf2(p.name)}`, bytes: await p.read() });
+  return out;
+}
+async function identityOf2(source) {
+  const keys = [...source.files.keys()].sort();
+  const files = await handedFiles(source, keys, async (k) => source.files.get(k).read(), (k) => source.files.get(k).name);
+  const byPath = new Map(files.map((f) => [f.path, f.bytes]));
+  return (await readMod({ name: source.name, layout: "game", list: async () => files.map((f) => ({ path: f.path, size: f.bytes.length })), read: async (p) => byPath.get(p) })).identity;
+}
+function looksLikeMod(paths) {
+  return paths.some((p) => /^[^/]+\/([^/]+\/)?(arr\/[^/]+\.dat(ex)?|scripts\/[^/]+\.bin|rez\/[^/]+\.tbl|unit\/.+\.grp)$/i.test(p) || /^[^/]+\/mod\.json$/i.test(p));
 }
 
 // save.ts
@@ -15803,11 +18413,11 @@ function teamLut(tunit, row) {
   }
   return lut;
 }
-function frameRgba(image, index, palette, lut, flip = false) {
-  const { width, height } = image;
+function frameRgba(image2, index, palette, lut, flip = false) {
+  const { width, height } = image2;
   const out = new Uint8ClampedArray(width * height * 4);
-  if (index < 0 || index >= image.frames.length) return out;
-  const pic = framePicture(image, index);
+  if (index < 0 || index >= image2.frames.length) return out;
+  const pic = framePicture(image2, index);
   for (let y = 0; y < height; y++) {
     for (let x3 = 0; x3 < width; x3++) {
       const v = pic[y * width + x3];
@@ -15821,15 +18431,15 @@ function frameRgba(image, index, palette, lut, flip = false) {
   }
   return out;
 }
-function sheetRgba(image, palette, lut) {
-  const columns = sheetColumns(image.frames.length);
-  const rows2 = Math.max(1, Math.ceil(image.frames.length / columns));
-  const W2 = Math.max(1, image.width * columns), H = Math.max(1, image.height * rows2);
+function sheetRgba(image2, palette, lut) {
+  const columns = sheetColumns(image2.frames.length);
+  const rows2 = Math.max(1, Math.ceil(image2.frames.length / columns));
+  const W2 = Math.max(1, image2.width * columns), H = Math.max(1, image2.height * rows2);
   const rgba = new Uint8ClampedArray(W2 * H * 4);
-  image.frames.forEach((_, i2) => {
-    const f = frameRgba(image, i2, palette, lut);
-    const ox = i2 % columns * image.width, oy = Math.floor(i2 / columns) * image.height;
-    for (let y = 0; y < image.height; y++) rgba.set(f.subarray(y * image.width * 4, (y + 1) * image.width * 4), ((oy + y) * W2 + ox) * 4);
+  image2.frames.forEach((_, i2) => {
+    const f = frameRgba(image2, i2, palette, lut);
+    const ox = i2 % columns * image2.width, oy = Math.floor(i2 / columns) * image2.height;
+    for (let y = 0; y < image2.height; y++) rgba.set(f.subarray(y * image2.width * 4, (y + 1) * image2.width * 4), ((oy + y) * W2 + ox) * 4);
   });
   return { width: W2, height: H, rgba, columns };
 }
@@ -15840,8 +18450,8 @@ async function importPng(current2, png, palette, frame) {
     const one = await pngToGrp(png, palette, { frameWidth: current2.width, frameHeight: current2.height, frames: 1 });
     const frames = current2.frames.slice();
     frames[frame] = one.image.frames[0];
-    const image = { ...current2, frames, ...current2.shares ? { shares: current2.shares.map((s, i2) => i2 === frame ? i2 : s === frame ? i2 : s) } : {} };
-    return { kind: "frame", grp: encodeGrpImage(image), image, report: one.report };
+    const image2 = { ...current2, frames, ...current2.shares ? { shares: current2.shares.map((s, i2) => i2 === frame ? i2 : s === frame ? i2 : s) } : {} };
+    return { kind: "frame", grp: encodeGrpImage(image2), image: image2, report: one.report };
   }
   if (fromSheet || img.width % current2.width === 0 && img.height % current2.height === 0) {
     const cells = img.width / current2.width * (img.height / current2.height);
@@ -16496,12 +19106,12 @@ var PicturesView = class {
     this.draw();
   }
   /** Show the GRP an image draws, in the animation view, playing `anim`. */
-  async showImage(image, anim) {
-    const e = this.entries.find((x3) => x3.images.includes(image));
+  async showImage(image2, anim) {
+    const e = this.entries.find((x3) => x3.images.includes(image2));
     if (!e) return;
     this.mode = "animation";
     await this.choose(e);
-    await this.preview.show(image, anim);
+    await this.preview.show(image2, anim);
     this.draw();
   }
   drawModes() {
@@ -16699,10 +19309,10 @@ var RacesView = class {
   hints = { names: [], letters: [] };
   asked = 0;
   /** `unsay` clears the status line when it still says `text`. */
-  constructor(table, say, unsay) {
+  constructor(table, say2, unsay) {
     this.table = table;
-    this.say = say;
-    this.refusal = new Refusal(say, unsay);
+    this.say = say2;
+    this.refusal = new Refusal(say2, unsay);
     this.scroller = h("div", { className: "mx-races", style: "flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px" });
     this.el = h("div", { className: "mx-col", style: "flex: 1" }, this.scroller);
   }
@@ -17256,14 +19866,14 @@ var ScriptsView = class {
         this.index = new ScriptIndex(files, images.columns.iscript_id);
         this.indexAt = this.ctx.session.revision;
       }
-      let image = -1;
-      for (let i2 = 0; i2 < images.count && image < 0; i2++) {
+      let image2 = -1;
+      for (let i2 = 0; i2 < images.count && image2 < 0; i2++) {
         const v = images.columns.iscript_id[i2] >>> 0;
-        if ((v & 65535) === id && this.index.find(v)?.member === doc.members[0]) image = i2;
+        if ((v & 65535) === id && this.index.find(v)?.member === doc.members[0]) image2 = i2;
       }
-      if (image !== this.shownImage) {
-        this.shownImage = image;
-        await this.preview.show(image >= 0 ? image : null);
+      if (image2 !== this.shownImage) {
+        this.shownImage = image2;
+        await this.preview.show(image2 >= 0 ? image2 : null);
       }
     })();
   }
@@ -17638,9 +20248,8 @@ var ModSession = class _ModSession {
   listeners = /* @__PURE__ */ new Set();
   editListeners = /* @__PURE__ */ new Set();
   opened = null;
+  /** Each edited member's SHA-256, until it changes again. */
   digests = /* @__PURE__ */ new Map();
-  /** The digests of the plugins and FireGraft project the mod carries, which no edit changes. */
-  carried = null;
   /** Whether a member is byte for byte the game's, once asked. */
   baseSame = /* @__PURE__ */ new Map();
   constructor(source, options) {
@@ -17721,13 +20330,16 @@ var ModSession = class _ModSession {
   /** The members whose bytes differ from what came (an edit put back the way it was is not one). */
   async edited() {
     const out = [];
-    const keys = /* @__PURE__ */ new Set([...this.overrides.keys(), ...this.added.keys(), ...[...this.dirtyTables].map((t2) => gameName(this.tableMember(t2))), ...this.dirtyStrings]);
-    for (const k of [...keys].sort()) {
+    for (const k of this.touchedMembers()) {
       const now = await this.read(k), was = await this.original(k);
       if (!now) continue;
       if (!was || !equal(now, was)) out.push(k);
     }
     return out;
+  }
+  /** The members an edit has touched (their bytes may be what came, an edit put back), by key, in name order. */
+  touchedMembers() {
+    return [.../* @__PURE__ */ new Set([...this.overrides.keys(), ...this.added.keys(), ...[...this.dirtyTables].map((t2) => gameName(this.tableMember(t2))), ...this.dirtyStrings])].sort();
   }
   /** Forget a member's cached digest (its bytes changed). */
   touched(member) {
@@ -18042,17 +20654,20 @@ var ModSession = class _ModSession {
     return out;
   }
   /**
-   * The mod's hash by the rule the play page, `scmjs mod info` and the editor's data sets share (core's
-   * `modHashOfDigests`; docs/mods.md, "The mod's hash"): a line for every game file the mod provides as it is now, one
-   * for each plugin it carries as a file (a plugin inside its archive is not loaded by the play page, so not a line)
-   * and one for its FireGraft project. Never compared with the game's own files: the play page finds the mod it keeps
-   * by this hash. A member that cannot be read (listed by its archive and not in it) is left out, as the page leaves
-   * it. Each member's digest is kept until it changes, so after an edit only that member is read again.
+   * What the mod goes by between people, as it is now: the hash `@scm-js/mod` gives it (`Identity.hash`), the one the
+   * editor, `scmjs mod info` and the play page name it by. Unedited, it is the mod's identity as it opened
+   * (`ModSource.identify`: known at once, or worked out the first time for a large mod). Edited, it is the hash the
+   * reader would give the mod saved as it is now (`identityWith`): each member an edit touched by the digest of the
+   * bytes it has now, the code as it came, which no edit here changes. Only the touched members are read, each once
+   * until it changes again. A member that cannot be read has no line, as the reader leaves it out.
    */
   async hash() {
-    const files = [];
-    for (const k of this.members()) {
-      if (!this.has(k)) continue;
+    const id = await this.source.identify();
+    const touched = this.touchedMembers();
+    if (!touched.length) return id.hash;
+    const files = {};
+    for (const k of touched) {
+      const name = this.source.files.get(k)?.line ?? this.nameOf(k);
       let d = this.digests.get(k);
       if (!d) {
         let bytes = null;
@@ -18060,19 +20675,16 @@ var ModSession = class _ModSession {
           bytes = await this.read(k);
         } catch {
         }
-        if (!bytes) continue;
-        d = await sha2562(bytes);
+        if (!bytes) {
+          files[name] = null;
+          continue;
+        }
+        d = await sha256Hex(bytes);
         this.digests.set(k, d);
       }
-      files.push({ name: k, sha256: d });
+      files[name] = d;
     }
-    this.carried ??= (async () => {
-      const plugins = [], firegraft = [];
-      for (const p of this.source.plugins) if (!p.member) plugins.push({ name: p.name, sha256: await sha2562(await p.read()) });
-      for (const p of this.source.firegraft) if (/\.fgp$/i.test(p.name)) firegraft.push({ name: p.name, sha256: await sha2562(await p.read()) });
-      return { plugins, firegraft };
-    })();
-    return (await modHashOfDigests({ files, ...await this.carried })).hash;
+    return (await identityWith(id, { files })).hash;
   }
   /** Every iscript id the mod's scripts define now, for the completion and the tables' references. */
   async iscriptIds() {
@@ -18127,8 +20739,8 @@ var ModSession = class _ModSession {
       const f = units.columns.graphics[u];
       if (f < flingy.count && flingy.columns.sprite[f] === id && this.data.names.units[u]) return this.data.names.units[u];
     }
-    const image = t2 === "sprites" ? sprites?.columns.image[id] : sprites && flingy ? sprites.columns.image[flingy.columns.sprite[id]] : void 0;
-    return image !== void 0 ? this.data.names.images?.[image] ?? "" : "";
+    const image2 = t2 === "sprites" ? sprites?.columns.image[id] : sprites && flingy ? sprites.columns.image[flingy.columns.sprite[id]] : void 0;
+    return image2 !== void 0 ? this.data.names.images?.[image2] ?? "" : "";
   }
   /** The tables as they are now, for a reader. */
   table(t2) {
@@ -18140,10 +20752,6 @@ var ModSession = class _ModSession {
   }
 };
 var cloneDat = (file) => ({ ...file, columns: Object.fromEntries(Object.entries(file.columns).map(([k, v]) => [k, v.slice()])) });
-async function sha2562(bytes) {
-  const d = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(d)].map((x3) => x3.toString(16).padStart(2, "0")).join("");
-}
 
 // stringsView.ts
 var ROW2 = 22;
@@ -18548,7 +21156,7 @@ function checkRow2(b, i2) {
   if (!ACTIONS[b.action]) throw new GraftError(`button ${i2 + 1}: no action ${b.action}`);
   for (const k of ["icon", "conditionParam", "actionParam", "enabledString", "disabledString"]) if (!u163(b[k])) throw new GraftError(`button ${i2 + 1}: ${k} is a whole number from 0 to 65535`);
 }
-var hex5 = (w) => `0x${w.toString(16).toUpperCase().padStart(4, "0")}`;
+var hex3 = (w) => `0x${w.toString(16).toUpperCase().padStart(4, "0")}`;
 var unitText = (names, type) => {
   const n = names(type);
   return n ? `${n} (${type})` : `(${type})`;
@@ -18560,7 +21168,7 @@ function requirementLines(words2, names) {
     const w = body[i2], op = OPCODES[w];
     if (w === 65535) out.push("end");
     else if (w < 65280) out.push(`owns ${unitText(names, w)}`);
-    else if (!op) out.push(hex5(w));
+    else if (!op) out.push(hex3(w));
     else if (op.takes && i2 + 1 < body.length) out.push(`${op.name} ${unitText(names, body[++i2])}`);
     else out.push(op.name);
   }
@@ -18577,9 +21185,9 @@ function requirementWords(text, unitByName) {
       const bracket = /\((\d+)\)\s*$/.exec(rest);
       if (bracket) return Number(bracket[1]);
       if (/^\d+$/.test(rest.trim())) return Number(rest.trim());
-      const byName2 = unitByName(rest.trim());
-      if (byName2 === null) throw new GraftError(`line ${n}: "${rest.trim()}" names no unit`);
-      return byName2;
+      const byName3 = unitByName(rest.trim());
+      if (byName3 === null) throw new GraftError(`line ${n}: "${rest.trim()}" names no unit`);
+      return byName3;
     };
     const lower = line.toLowerCase();
     if (lower === "end") {
@@ -19013,20 +21621,7 @@ var LiveSender = class {
 // engine.ts
 var ENGINE_SERVICE = "scm-sim.engine";
 async function engineFiles(s) {
-  const out = [];
-  for (const k of s.members()) {
-    if (!s.has(k)) continue;
-    let bytes = null;
-    try {
-      bytes = await s.read(k);
-    } catch {
-    }
-    if (bytes) out.push({ path: livePath(s.nameOf(k)), bytes });
-  }
-  const leaf2 = (n) => n.split(/[\\/]/).pop();
-  for (const p of s.source.plugins) if (!p.member) out.push({ path: `plugins/${leaf2(p.name)}`, bytes: await p.read() });
-  for (const p of s.source.firegraft) if (/\.(fgp|fgd)$/i.test(p.name)) out.push({ path: `firegraft/${leaf2(p.name)}`, bytes: await p.read() });
-  return out;
+  return handedFiles(s.source, s.members().filter((k) => s.has(k)), (k) => s.read(k), (k) => s.nameOf(k));
 }
 var EngineRegistration = class {
   engine = null;
@@ -19104,7 +21699,7 @@ function parse(field, text) {
 
 // tablesView.ts
 var ROW3 = 22;
-var NAMED = ["units", "weapons", "upgrades", "techdata"];
+var NAMED2 = ["units", "weapons", "upgrades", "techdata"];
 function tableLabel(table) {
   switch (table) {
     case "units":
@@ -19211,7 +21806,7 @@ var TablesView = class {
     }
     this.table = table;
     this.picker.value = table;
-    this.unnamed = !NAMED.includes(table);
+    this.unnamed = !NAMED2.includes(table);
     this.unnamedBox.checked = this.unnamed;
     this.columns = columnsOf(table);
     this.template = `56px 210px 52px ${this.columns.map((c2) => c2.field.text?.kind === "flags" ? "96px" : "84px").join(" ")}`;
@@ -19253,7 +21848,7 @@ var TablesView = class {
     this.ids = ids;
     const named = names.filter(Boolean).length;
     const what = tableLabel(this.table).toLowerCase();
-    this.count.textContent = q ? t("{shown} of {total} found", { shown: num2(ids.length), total: num2(file.count) }) : NAMED.includes(this.table) ? t("{named} named {what} of {total}", { named: num2(named), what, total: num2(file.count) }) : t("{total} entries", { total: num2(file.count) });
+    this.count.textContent = q ? t("{shown} of {total} found", { shown: num2(ids.length), total: num2(file.count) }) : NAMED2.includes(this.table) ? t("{named} named {what} of {total}", { named: num2(named), what, total: num2(file.count) }) : t("{total} entries", { total: num2(file.count) });
     this.sizer.style.height = `${(ids.length + 1) * ROW3}px`;
     this.sizer.style.width = `${56 + 210 + 52 + this.columns.reduce((n, c2) => n + (c2.field.text?.kind === "flags" ? 96 : 84), 0)}px`;
     if (!keep) this.grid.scrollTop = 0;
@@ -19537,7 +22132,7 @@ var TablesView = class {
 
 // plugin.ts
 function activate(api) {
-  api.i18n.register({ ko: KO });
+  api.i18n.register({ ko: { ...KO, ...MOD_KO } });
   bindLanguage(api);
   const editor = new ModEditor(api);
   api.commands.register({ id: "open", title: msg2("Open a Mod\u2026"), run: (...args) => editor.openCommand(args[0]) });
@@ -19851,7 +22446,7 @@ var ModEditor = class {
       const base = this.api.gameData.source()?.kind === "none" ? null : (member) => this.baseRead(member);
       this.baseCache.clear();
       if (base) await this.readBaseManifest();
-      const source = await openPieces(pieces, name, base);
+      const source = await openPieces(pieces, name, base, (m) => this.say(modWords(m)));
       const session = await ModSession.open(source, { base, baseHas: base ? (m) => this.baseHas(m) : void 0 });
       this.session = session;
       this.races = new RaceTable({ gameData: racesApi(this.api.gameData), profileId: () => this.session === session ? this.profile().id : null, ours: () => this.session === session && this.isOurs() }, source.races);
@@ -19878,6 +22473,7 @@ var ModEditor = class {
     this.dropViews();
     this.look = null;
     const ours = !!this.attached && this.isOurs();
+    this.session?.source.close();
     this.session = null;
     this.races = null;
     this.live.follow(null);
@@ -19945,9 +22541,11 @@ var ModEditor = class {
     return !!s && s.kind === "reader" && !!this.attached && s.profile.id === this.attached.profile.id;
   }
   /**
-   * Hands the editor a reader over the mod's current files. The hash (over the files that differ from the game's) is
-   * what a map saved now records: a small mod's goes with the reader, a large one's follows by `rehash` once worked out,
-   * the editor drawing from the mod meanwhile.
+   * Hands the editor a reader over the mod's current files. The hash (`ModSession.hash`, the mod's identity) is what a
+   * map saved now records: it goes with the reader when it is known already (the reader worked it out as the mod
+   * opened) or quick to work out (the mod's files under `HASH_LATER`). Otherwise — a large mod, described without
+   * hashing its files, or a large text folder, whose every member is packed for it — the reader goes without one (the
+   * editor's source says its hash is pending) and the hash follows by `rehash`, the editor drawing from the mod meanwhile.
    */
   async attach() {
     const gd = this.gameData;
@@ -19961,7 +22559,7 @@ var ModEditor = class {
     this.reader = attachReader({ has: (m) => session.has(m), read: (m) => session.read(m) });
     const profile = this.profile();
     const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
-    const hash = bytes < 64 * 1024 * 1024 ? await session.hash() : null;
+    const hash = session.source.identity || bytes < HASH_LATER ? await session.hash() : null;
     if (this.session !== session) return;
     const source = await gd.attach(profile, this.reader, hash ? { hash } : void 0);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
@@ -19970,7 +22568,13 @@ var ModEditor = class {
     this.status();
     if (!hash) {
       this.say(t("Working out the mod's hash over {size}\u2026", { size: sizeText(bytes) }));
-      const later = await session.hash();
+      let later;
+      try {
+        later = await session.hash();
+      } catch (e) {
+        if (this.session === session) this.say(t("The mod could not be opened: {error}", { error: e instanceof ModError ? modWords(e.detail) : e instanceof Error ? e.message : String(e) }));
+        return;
+      }
       if (this.session !== session || !this.isOurs()) return;
       const again = gd.rehash(later);
       this.attached = { profile, hash: later, label: this.attachedLabel(again?.label ?? source.label, later) };
@@ -20015,8 +22619,8 @@ var ModEditor = class {
         await this.attach();
       } else {
         gd.reload();
-        const hash = await session.hash();
-        if (this.session !== session) return;
+        const hash = await session.hash().catch(() => null);
+        if (this.session !== session || !hash) return;
         if (hash !== this.attached.hash) {
           const source = gd.rehash(hash);
           this.attached = { profile: this.attached.profile, hash, label: this.attachedLabel(source?.label ?? "", hash) };
