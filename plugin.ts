@@ -15,9 +15,10 @@
 import type { FolderFile, GameDataProfile, PanelHandle, PluginApi } from "@scm-js/plugin-api";
 import { DAT_SCHEMAS, createScenario, serializeScenario, type DatTableName, type ModChange, type ModFinding } from "@scm-js/core";
 import { button, clear, ensureStyle, h } from "./dom";
-import { bindLanguage, msg, t } from "./i18n";
+import { bindLanguage, modWords, msg, t } from "./i18n";
 import { foundLine, gameCopyNotice, num, sizeText } from "./info";
 import { KO } from "./ko";
+import { MOD_KO } from "./modKo";
 import { DEFAULT_DIST, DIST_STORAGE_KEY } from "./monaco";
 import { PlayTab, playAddress, playMessage, playPageThere } from "./play";
 import { attachReader } from "./reader";
@@ -37,7 +38,7 @@ import { ENGINE_SERVICE, EngineRegistration, type EngineService } from "./engine
 import { TablesView, type ViewContext } from "./tablesView";
 
 export default function activate(api: PluginApi) {
-  api.i18n.register({ ko: KO });
+  api.i18n.register({ ko: { ...KO, ...MOD_KO } });
   bindLanguage(api);
   const editor = new ModEditor(api);
   api.commands.register({ id: "open", title: msg("Open a Mod…"), run: (...args: unknown[]) => editor.openCommand(args[0]) });
@@ -294,7 +295,8 @@ class ModEditor {
       const base = this.api.gameData.source()?.kind === "none" ? null : (member: string) => this.baseRead(member);
       this.baseCache.clear();
       if (base) await this.readBaseManifest();
-      const source = await openPieces(pieces, name, base);
+      // (the reader says how far it is: every file of the mod is read once, for its hash)
+      const source = await openPieces(pieces, name, base, (m) => this.say(modWords(m)));
       const session = await ModSession.open(source, { base, baseHas: base ? (m) => this.baseHas(m) : undefined });
       this.session = session;
       this.races = new RaceTable({ gameData: racesApi(this.api.gameData), profileId: () => (this.session === session ? this.profile().id : null), ours: () => this.session === session && this.isOurs() }, source.races);
@@ -396,9 +398,10 @@ class ModEditor {
   }
 
   /**
-   * Hands the editor a reader over the mod's current files. The hash (over the files that differ from the game's) is
-   * what a map saved now records: a small mod's goes with the reader, a large one's follows by `rehash` once worked out,
-   * the editor drawing from the mod meanwhile.
+   * Hands the editor a reader over the mod's current files. The hash (`ModSession.hash`, the mod's identity) is what a
+   * map saved now records: it goes with the reader when it is known already (the reader worked it out as the mod
+   * opened) or quick to work out; a large text folder's, which means packing every member, follows by `rehash`, the
+   * editor drawing from the mod meanwhile.
    */
   private async attach() {
     const gd = this.gameData;
@@ -409,7 +412,7 @@ class ModEditor {
     this.reader = attachReader({ has: (m) => session.has(m), read: (m) => session.read(m) });
     const profile = this.profile();
     const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
-    const hash = bytes < 64 * 1024 * 1024 ? await session.hash() : null;
+    const hash = session.source.identity || bytes < 64 * 1024 * 1024 ? await session.hash() : null;
     if (this.session !== session) return;
     const source = await gd.attach(profile, this.reader, hash ? { hash } : undefined);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };

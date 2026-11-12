@@ -70,3 +70,40 @@ export function diskPieces(dir: string): Piece[] {
 }
 
 export const equal = (a: Uint8Array | null, b: Uint8Array | null) => !!a && !!b && a.length === b.length && a.every((x, i) => x === b[i]);
+
+/* ── A patcher exe, made byte by byte (no mod is needed) ──────────────── */
+
+const concat = (...parts: Uint8Array[]): Uint8Array => { const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0)); let at = 0; for (const p of parts) { out.set(p, at); at += p.length; } return out; };
+const words = (...w: number[]): Uint8Array => { const b = new Uint8Array(w.length * 4), v = new DataView(b.buffer); w.forEach((x, i) => v.setUint32(i * 4, x >>> 0, true)); return b; };
+
+/** A Windows program of one section, 0x400 bytes, never run; `overlayAt` where FireGraft's patcher keeps its overlay's offset. */
+function program(overlayAt: number): Uint8Array {
+  const b = new Uint8Array(0x400), v = new DataView(b.buffer);
+  b[0] = 0x4d; b[1] = 0x5a; v.setUint32(0x18, overlayAt, true); v.setUint32(0x3c, 0x40, true);
+  v.setUint32(0x40, 0x00004550, true); v.setUint16(0x46, 1, true); v.setUint16(0x54, 0, true);
+  b.set([0x2e, 0x74, 0x65, 0x78, 0x74], 0x40 + 24);
+  v.setUint32(0x40 + 24 + 16, 0x200, true); v.setUint32(0x40 + 24 + 20, 0x200, true);
+  return b;
+}
+
+/** A library of 0x400 bytes whose export directory names it `name`: a plugin a patcher carries goes by that name. */
+export function madeLibrary(name: string): Uint8Array {
+  const b = new Uint8Array(0x400), v = new DataView(b.buffer);
+  b[0] = 0x4d; b[1] = 0x5a; v.setUint32(0x3c, 0x40, true);
+  v.setUint32(0x40, 0x00004550, true); v.setUint16(0x44, 0x14c, true); v.setUint16(0x46, 1, true); v.setUint16(0x54, 0xe0, true); v.setUint16(0x56, 0x2102, true);
+  const opt = 0x58;
+  v.setUint16(opt, 0x10b, true); v.setUint32(opt + 92, 16, true); v.setUint32(opt + 96, 0x1000, true); v.setUint32(opt + 100, 40, true);
+  const section = opt + 0xe0;
+  b.set([0x2e, 0x65, 0x64, 0x61, 0x74, 0x61], section);
+  v.setUint32(section + 8, 0x100, true); v.setUint32(section + 12, 0x1000, true); v.setUint32(section + 16, 0x200, true); v.setUint32(section + 20, 0x200, true);
+  v.setUint32(0x200 + 12, 0x1000 + 40, true); b.set(new TextEncoder().encode(name), 0x228);
+  return b;
+}
+
+/** FireGraft's patcher exe: the program, its overlay (`PEGF`, a count, a form, then each plugin's id, size, 0 and bytes) and the archive after it. */
+export function madePatcherExe(plugins: { id: number; bytes: Uint8Array }[], archive: Uint8Array): Uint8Array {
+  const overlay = concat(new Uint8Array([0x50, 0x45, 0x47, 0x46]), words(plugins.length, 1), ...plugins.flatMap((p) => [words(p.id, p.bytes.length, 0), p.bytes]));
+  const head = concat(program(0x400), overlay);
+  const at = Math.ceil(head.length / 512) * 512;
+  return concat(head, new Uint8Array(at - head.length), archive);
+}

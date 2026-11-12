@@ -6,6 +6,7 @@
  * Both take a literal: `tests/ko.test.ts` reads them from the source.
  */
 import type { PluginApi } from "@scm-js/plugin-api";
+import { renderMessage, type ModMessage } from "@scm-js/mod";
 
 export type Params = Record<string, string | number>;
 
@@ -20,6 +21,11 @@ export const t = (text: string, params?: Params): string => (i18n ? i18n.t(text,
 /** A `msg()`'d value, shown in the reader's language. */
 export const translate = (text: string, params?: Params): string => (i18n ? i18n.t(text, params) : english(text, params));
 export const msg = (text: string): string => text;
+/**
+ * A sentence of `@scm-js/mod`'s (an error, a notice), in the reader's language: its English template looked up in the
+ * catalogue like any other (`modKo.ts` holds the Korean for every one), its parameters filled the same way.
+ */
+export const modWords = (message: ModMessage): string => renderMessage(message, (template, params) => translate(template, params as Params));
 
 /**
  * The English text with its placeholders filled, for when no editor is there to ask (the

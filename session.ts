@@ -6,12 +6,13 @@
  */
 import {
   DAT_SCHEMAS, DAT_TABLES, aiNames, decodeLoFile, encodeLoFile, loFromText, loToText, aiscriptFromText, aiscriptToText, checkMod, datTableOf, decodeDat, decodeTblFile, diffMods, encodeDat, encodeTblFile,
-  entryText, fieldType, gameName, iscriptFromText, iscriptToText, loadModData, modHashOfDigests, namesOf, placeOf, readIscriptHeaders, storedRange,
-  type AiNames, type Digest, type DatField, type DatFile, type DatTableName, type DiffSide, type ModChange, type ModData, type ModFinding, type TblFile,
+  entryText, fieldType, gameName, iscriptFromText, iscriptToText, loadModData, namesOf, placeOf, readIscriptHeaders, storedRange,
+  type AiNames, type DatField, type DatFile, type DatTableName, type DiffSide, type ModChange, type ModData, type ModFinding, type TblFile,
 } from "@scm-js/core";
+import { gameName as lineName, runningHash, sha256Hex, type Identity } from "@scm-js/mod";
 import { msg, translate, type Params } from "./i18n";
 import { RefIndex } from "./refs";
-import type { ModSource } from "./source";
+import { identityOf, type ModSource } from "./source";
 
 /** A file by the game's name, or null. */
 export type ReadMember = (member: string) => Promise<Uint8Array | null>;
@@ -86,9 +87,10 @@ export class ModSession {
   private readonly listeners = new Set<() => void>();
   private readonly editListeners = new Set<(e: EditEvent) => void>();
   private opened: ModData | null = null;
+  /** Each edited member's SHA-256, until it changes again. */
   private readonly digests = new Map<string, string>();
-  /** The digests of the plugins and FireGraft project the mod carries, which no edit changes. */
-  private carried: Promise<{ plugins: Digest[]; firegraft: Digest[] }> | null = null;
+  /** What the mod went by as it was opened (the reader's `identity`; a text folder's worked out when first asked). */
+  private identity: Promise<Identity> | null = null;
   /** Whether a member is byte for byte the game's, once asked. */
   private readonly baseSame = new Map<string, boolean>();
 
@@ -177,13 +179,17 @@ export class ModSession {
   /** The members whose bytes differ from what came (an edit put back the way it was is not one). */
   async edited(): Promise<string[]> {
     const out: string[] = [];
-    const keys = new Set([...this.overrides.keys(), ...this.added.keys(), ...[...this.dirtyTables].map((t) => gameName(this.tableMember(t))), ...this.dirtyStrings]);
-    for (const k of [...keys].sort()) {
+    for (const k of this.touchedMembers()) {
       const now = await this.read(k), was = await this.original(k);
       if (!now) continue;
       if (!was || !equal(now, was)) out.push(k);
     }
     return out;
+  }
+
+  /** The members an edit has touched (their bytes may be what came, an edit put back), by key, in name order. */
+  private touchedMembers(): string[] {
+    return [...new Set([...this.overrides.keys(), ...this.added.keys(), ...[...this.dirtyTables].map((t) => gameName(this.tableMember(t))), ...this.dirtyStrings])].sort();
   }
 
   /** Forget a member's cached digest (its bytes changed). */
@@ -523,34 +529,34 @@ export class ModSession {
   }
 
   /**
-   * The mod's hash by the rule the play page, `scmjs mod info` and the editor's data sets share (core's
-   * `modHashOfDigests`; docs/mods.md, "The mod's hash"): a line for every game file the mod provides as it is now, one
-   * for each plugin it carries as a file (a plugin inside its archive is not loaded by the play page, so not a line)
-   * and one for its FireGraft project. Never compared with the game's own files: the play page finds the mod it keeps
-   * by this hash. A member that cannot be read (listed by its archive and not in it) is left out, as the page leaves
-   * it. Each member's digest is kept until it changes, so after an edit only that member is read again.
+   * What the mod goes by between people, as it is now: the hash `@scm-js/mod` gives it (`Identity.hash`), the one the
+   * editor, `scmjs mod info` and the play page name it by. Unedited, it is the hash the reader worked out when the mod
+   * opened, and nothing is read. Edited, it is the hash the reader would give the mod saved as it is now: the lines of
+   * the hash as it opened, each member an edit touched with its line for the bytes it has now (a member it gave the mod
+   * a line of its own), and every module of its code with its line, which no edit here changes. Only the touched
+   * members are read, each once until it changes again. A member that cannot be read has no line, as the reader leaves
+   * it out.
    */
   async hash(): Promise<string> {
-    const files: Digest[] = [];
-    for (const k of this.members()) {
-      if (!this.has(k)) continue;
+    this.identity ??= this.source.identity ? Promise.resolve(this.source.identity) : identityOf(this.source);
+    const id = await this.identity;
+    const touched = this.touchedMembers();
+    if (!touched.length) return id.hash;
+    const lines = new Map(id.lines.map((l) => [l.slice(0, l.indexOf("\t")), l]));
+    for (const k of touched) {
+      const name = this.source.files.get(k)?.line ?? lineName(this.nameOf(k));
       let d = this.digests.get(k);
       if (!d) {
         let bytes: Uint8Array | null = null;
         try { bytes = await this.read(k); } catch { /* left out */ }
-        if (!bytes) continue;
-        d = await sha256(bytes);
+        if (!bytes) { lines.delete(name); continue; }
+        d = await sha256Hex(bytes);
         this.digests.set(k, d);
       }
-      files.push({ name: k, sha256: d });
+      // (a game file's line, as the reader writes it: `@scm-js/mod` exports no maker of one)
+      lines.set(name, `${name}\t${d}`);
     }
-    this.carried ??= (async () => {
-      const plugins: Digest[] = [], firegraft: Digest[] = [];
-      for (const p of this.source.plugins) if (!p.member) plugins.push({ name: p.name, sha256: await sha256(await p.read()) });
-      for (const p of this.source.firegraft) if (/\.fgp$/i.test(p.name)) firegraft.push({ name: p.name, sha256: await sha256(await p.read()) });
-      return { plugins, firegraft };
-    })();
-    return (await modHashOfDigests({ files, ...(await this.carried) })).hash;
+    return runningHash([...lines.values()], id.plugins, Object.keys(id.plugins));
   }
 
   /** Every iscript id the mod's scripts define now, for the completion and the tables' references. */
@@ -605,8 +611,3 @@ export class ModSession {
 }
 
 const cloneDat = (file: DatFile): DatFile => ({ ...file, columns: Object.fromEntries(Object.entries(file.columns).map(([k, v]) => [k, v.slice()])) });
-
-async function sha256(bytes: Uint8Array): Promise<string> {
-  const d = await crypto.subtle.digest("SHA-256", bytes as Uint8Array<ArrayBuffer>);
-  return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, "0")).join("");
-}

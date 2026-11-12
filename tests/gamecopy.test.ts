@@ -3,7 +3,8 @@
  * the game's: nothing of the game's is in this repository.
  */
 import { describe, expect, it } from "vitest";
-import { OpenError, gameCopyFiles, openPieces, type Piece } from "../source";
+import { gameCopyFiles } from "@scm-js/mod";
+import { OpenError, openPieces, type Piece } from "../source";
 import { ModSession } from "../session";
 import { foundLine, gameCopyNotice } from "../info";
 import { textFolder, writeMpq } from "../save";
@@ -50,10 +51,11 @@ describe("a copy of the game handed over with a mod", () => {
     const { mod, game } = await handedOver();
     const both = await openPieces([...mod, ...game], "Cosmonarchy");
     const alone = await openPieces(mod.map((p) => ({ ...p, path: p.path.replace(/^Cosmonarchy\//, "") })), "Release");
+    // (by copy, the game's own archives first in the game's order, then the rest by path: the reader's order)
     expect(both.gameCopy).toEqual([
-      "Cosmonarchy/Starcraft/BrooDat.mpq", "Cosmonarchy/Starcraft/BroodWar.mpq",
-      "Cosmonarchy/Starcraft/Maps/CMBW-Root/CMBW-editor/CMBW-editor.mpq", "Cosmonarchy/Starcraft/Maps/CMBW-Root/CMBW-editor/grafting/graftc.exe", "Cosmonarchy/Starcraft/Maps/Tools.zip",
-      "Cosmonarchy/Starcraft/StarCraft.mpq", "Cosmonarchy/Starcraft/StarDat.mpq", "Cosmonarchy/Starcraft/patch_rt.mpq",
+      "Cosmonarchy/Starcraft/StarDat.mpq", "Cosmonarchy/Starcraft/BrooDat.mpq", "Cosmonarchy/Starcraft/patch_rt.mpq", "Cosmonarchy/Starcraft/StarCraft.mpq",
+      "Cosmonarchy/Starcraft/BroodWar.mpq", "Cosmonarchy/Starcraft/Maps/CMBW-Root/CMBW-editor/CMBW-editor.mpq",
+      "Cosmonarchy/Starcraft/Maps/CMBW-Root/CMBW-editor/grafting/graftc.exe", "Cosmonarchy/Starcraft/Maps/Tools.zip",
     ]);
     for (const p of both.gameCopy) expect(both.left, p).not.toContain(p);
     expect(keys(both)).toEqual(keys(alone));
@@ -133,8 +135,9 @@ describe("a copy of the game handed over with a mod", () => {
       { file: "Game/mod.mpq", data: await mpq({ "arr\\units.dat": "u" }) },
     ]);
     const source = await openPieces([bytesPiece("bundle.zip", zip)], "bundle.zip");
-    expect(source.gameCopy).toEqual(["Game/Maps/tool.exe", "Game/StarDat.mpq", "Game/patch_rt.mpq"]);
-    expect(source.layers).toEqual(["Game/mod.mpq"]);
+    // (a zip named alone: its members are laid under its own name, as the reader lays them)
+    expect(source.gameCopy).toEqual(["bundle/Game/StarDat.mpq", "bundle/Game/patch_rt.mpq", "bundle/Game/Maps/tool.exe"]);
+    expect(source.layers).toEqual(["bundle/Game/mod.mpq"]);
     expect(keys(source)).toEqual(["arr\\units.dat"]);
   });
 

@@ -13,10 +13,12 @@ It needs scmJS 0.13.0 or newer. An older editor opens mods and edits them, but c
 ## What it does
 
 **File ▸ Open a Mod…** opens a panel under the map. Drop the mod on it, or choose its folder or file: a folder of the
-game's files (at its root or one folder down, as `mpq/` in a mod's release), an `.mpq`, a mod's self-executing `.exe`
-(MPQDraft's or FireGraft's — the archive inside is read, nothing is run), a `.zip` of any of these, or a folder that
-`scmjs mod unpack` wrote. An `.mpq`, `.exe` or `.zip` dropped on the editor itself opens here too. The panel says in
-one line what it found.
+game's files (at its top or a folder or two down, as `mpq/` in a mod's release), an `.mpq`, a mod's self-executing
+`.exe` (MPQDraft's or FireGraft's — the archive inside is read, nothing is run), a `.zip` of any of these, or a folder
+that `scmjs mod unpack` wrote. An `.mpq`, `.exe` or `.zip` dropped on the editor itself opens here too. The panel says
+in one line what it found. Which files in what you open are the mod's, what it is called and the hash it goes by are
+read by [`@scm-js/mod`](https://www.npmjs.com/package/@scm-js/mod), the same reader the editor, `scmjs` and the play
+page use, so all of them name a mod alike. Every file of the mod is read once as it opens, for its hash.
 
 A copy of the game in what you open is not the mod. In a folder that holds `StarDat.mpq`, the game's own archives
 (`StarDat.mpq`, `BrooDat.mpq`, `patch_rt.mpq`, `StarCraft.mpq`, `BroodWar.mpq`) and everything under its `Maps` folder
@@ -82,16 +84,21 @@ still a mod.
 
 **The map follows the mod.** While a mod is open the editor draws from it: the unit palette shows its units and names,
 the settings dialogs its defaults, the map its pictures. Change a unit's hit points and Unit Settings shows the new
-default. The status line says what the editor draws from and the mod's hash (the one a map saved now records). Files an
-operating system leaves in folders (`desktop.ini`, `Thumbs.db`, `.DS_Store` and the like) are not the mod's: they are
-left out of its files, its counts and its hash, so a mod has the same hash whether its folder was picked, dropped or
-read by `scmjs`.
+default. The status line says what the editor draws from and the mod's hash (the one a map saved now records). The hash
+covers every game file the mod lays, its FireGraft project and every module of its code: the plugins it ships as
+files, the plugins a patcher `.exe` carries in itself and the DLLs they load (a plugin packed inside the mod's archive,
+which no loader loads, is not in it). After an edit it is the hash the mod would have saved as it is then; put an
+edit back and the hash is the one it opened with. Files an operating system leaves in folders (`desktop.ini`,
+`Thumbs.db`, `.DS_Store` and the like) are not the mod's: they are left out of its files, its counts and its hash, so a
+mod has the same hash whether its folder was picked, dropped or read by `scmjs`.
 
 **Save** writes the mod in the form it came: an MPQ for an `.mpq`, `.exe` or `.zip`; the folder of text for a folder
 `scmjs mod unpack` wrote (as a zip); for a folder of loose files, the files you changed in their folders (as a zip, to
 copy over it). **Save as Folder** writes the folder of text and pictures `scmjs mod unpack` lays out, as a zip, each
-text kept only where it packs back to the same bytes. **Export as MPQ** writes the MPQ the launchers load. A file
-nobody changed is written byte for byte as it came.
+text kept only where it packs back to the same bytes; the mod's plugins are written beside it, so it opens again under
+the same hash. **Export as MPQ** writes the MPQ the launchers load. A file nobody changed is written byte for byte as
+it came. An MPQ holds none of the plugins a patcher `.exe` carries in itself, so an `.exe` with such plugins, saved as
+an MPQ, goes by another hash.
 
 **Diff…** reads what changed as a changelog — against the game, or against the mod as it was opened ("Terran Marine:
 hit points 40 → 50"). **Check…** looks across the tables for what would break in the game (a reference past its
@@ -99,14 +106,15 @@ table, an image with no picture, a script no image uses …); click a finding to
 
 **Play** hands the mod's files that differ from the game's, with the open map, to the play page at `/play/` beside the
 editor (on scmjs.dev), in a tab of its own. A development server of the editor alone has no play page, and the panel
-says so.
+says so. Its plugins are not handed, so the page keeps those files under their own hash, which answers to the
+editor's too.
 
 While a mod is open and the editor draws from it, the scm-sim plugin (0.19.0 or later) is told where its files are,
 under the mod's hash. A replay of the mod opened in the Aftermath plugin's Game view, Play From Here, Test in Browser
 and a replay's analysis then play with the mod even where the play page has not got it yet: the page is handed the
-mod's files (every file it provides, its plugins and its FireGraft project) and keeps them, once. Nothing is read
-until a page says it has not got the mod. Another hash after an edit is registered in its place; closing the mod
-takes it away.
+mod's files in the game's paths (every file it provides, every module of its code that is in the hash, and its
+FireGraft files) and keeps them, once, under the same hash. Nothing is read until a page says it has not got the mod.
+Another hash after an edit is registered in its place; closing the mod takes it away.
 
 **Start Test Game** takes Play's place when the scm-sim plugin is installed (its `scm-sim.live` service): the open map —
 or a blank one — is played with the mod in the play page's tab, and while that game runs alone **every edit goes into
@@ -123,7 +131,8 @@ make it another game on the others.
 npm install
 npm run build        # dist/plugin.js
 npm test             # vitest; SCMJS_COSMONARCHY=<a release folder holding mpq/> adds a large mod's test,
-                     # SCMJS_COSMONARCHY_ROOT=<a folder holding Release/ beside a copy of the game> another
+                     # SCMJS_COSMONARCHY_ROOT=<a folder holding Release/ beside a copy of the game> another,
+                     # SCMJS_MODS=<a mod's folder or file>[:<another>…] checks each mod's hash and what is handed
 npm run typecheck
 ```
 
