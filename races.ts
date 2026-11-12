@@ -10,61 +10,28 @@
  * `raceCandidates`. Those came after this plugin's API package; an editor from before them has none, so each is looked
  * for before it is called. Pure: no DOM, so the tests run it in Node.
  */
+import { MAX_RACE_NAME, normalizeRaces, type DataSetRace } from "@scm-js/mod";
 import { msg, t, translate } from "./i18n";
 
-/** A race a data set adds to the game's own (the editor's `DataSetRace`). */
-export interface DataSetRace {
-  /** The race byte: 8–255. (0–7 are the game's and cannot be declared.) */
-  id: number;
-  /** What it is called, 40 characters at most, trimmed, not empty. */
-  name: string;
-  /** The lower-case letter its per-race files go by (`game\<letter>console.pcx`, `rez\statbtn<letter>.bin`), when it has them. */
-  letter?: string;
-  /** The game's race it plays as, where only the game's three are known: 0, 1 or 2. Absent: not declared. */
-  like?: 0 | 1 | 2;
-}
+/**
+ * A race a data set adds to the game's own, and the rule every carrier reads a table of them by (`normalizeRaces`: rows
+ * of an id 8–255 and a name of 1–40 characters, a letter a–z lower-cased, a `like` of 0–2, the first row of an id kept,
+ * sorted by id): `@scm-js/mod`'s, the one the editor, the command line and the play page read `mod.json` and a
+ * hand-over by.
+ */
+export { normalizeRaces, type DataSetRace };
 
 /** The first race byte a data set may declare; 0–7 are the game's. */
 export const FIRST_RACE = 8;
 export const LAST_RACE = 255;
 /** The longest name a declared race may have. */
-export const RACE_NAME_MAX = 40;
+export const RACE_NAME_MAX = MAX_RACE_NAME;
 
 /** The game's own eight races by their byte. */
 export const GAME_RACES: readonly string[] = [msg("Zerg"), msg("Terran"), msg("Protoss"), msg("Independent"), msg("Neutral"), msg("User Selectable"), msg("Random"), msg("Inactive")];
 
 /** The letters the game's own per-race files go by (`game\zconsole.pcx` …, `n` the neutral console's), and whose. */
 export const GAME_LETTERS: Readonly<Record<string, string>> = { z: msg("Zerg"), t: msg("Terran"), p: msg("Protoss"), n: msg("Neutral") };
-
-/**
- * A table of declared races as every carrier keeps it (the editor's rule): each row's `id` an integer 8–255, its `name`
- * trimmed, not empty and at most 40 characters, `letter` one letter a–z (lower-cased) and `like` 0, 1 or 2 when present
- * and valid (an invalid one is left off the row). A row without a usable id or name is dropped, and so is a later row
- * with an id an earlier one has. Sorted by id. Fields a row has beyond these are kept. Anything that is not an array is
- * an empty table; nothing here throws.
- */
-export function normalizeRaces(value: unknown): DataSetRace[] {
-  if (!Array.isArray(value)) return [];
-  const seen = new Set<number>();
-  const out: DataSetRace[] = [];
-  for (const row of value as unknown[]) {
-    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-    const r = row as Record<string, unknown>;
-    const id = r.id;
-    if (typeof id !== "number" || !Number.isInteger(id) || id < FIRST_RACE || id > LAST_RACE || seen.has(id)) continue;
-    const name = typeof r.name === "string" ? r.name.trim() : "";
-    if (!name || name.length > RACE_NAME_MAX) continue;
-    const kept: Record<string, unknown> = { ...r, id, name };
-    delete kept.letter;
-    delete kept.like;
-    const letter = typeof r.letter === "string" && /^[a-z]$/i.test(r.letter.trim()) ? r.letter.trim().toLowerCase() : undefined;
-    if (letter) kept.letter = letter;
-    if (r.like === 0 || r.like === 1 || r.like === 2) kept.like = r.like;
-    seen.add(id);
-    out.push(kept as unknown as DataSetRace);
-  }
-  return out.sort((a, b) => a.id - b.id);
-}
 
 /** Whether two tables say the same: the same ids, names, letters and `like`s, in order. */
 export function sameRaces(a: readonly DataSetRace[], b: readonly DataSetRace[]): boolean {

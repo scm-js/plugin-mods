@@ -5,13 +5,15 @@
  * Browser, a replay's analysis — finds its files here, and the play page keeps them as a dropped mod. Nothing is read
  * until a page says it has not got the mod.
  *
- * The files are what the mod's hash is worked out over (`ModSession.hash`, the rule the play page shares): every file
- * the mod provides as it is now, the plugins it carries as files and its FireGraft project. So the page keeps it under
- * the hash the editor names it by, and a mod whose code runs is kept with its code (Play hands only the files that
- * differ from the game's: kept without its plugins, such a mod would play another game).
+ * The files are what the mod's hash is worked out over (`ModSession.hash`, `@scm-js/mod`'s identity), in the game's
+ * paths (`handedFiles`): every file the mod provides as it is now, every module of its code that has a line in the hash
+ * (its plugins and the libraries they map, given as files or carried in a patcher exe) under `plugins/`, and its
+ * FireGraft files under `firegraft/`. The page reads them with the same reader, so it names them by the same hash, and
+ * a mod whose code runs is kept with its code (Play hands only the files that differ from the game's: kept without its
+ * plugins, such a mod would play another game).
  */
 import type { ModSession } from "./session";
-import { livePath } from "./live";
+import { handedFiles } from "./source";
 
 export const ENGINE_SERVICE = "scm-sim.engine";
 
@@ -25,21 +27,9 @@ export interface EngineService {
 
 type EngineSession = Pick<ModSession, "members" | "has" | "read" | "nameOf" | "source">;
 
-/** The open mod's files for the engine: every file it provides as it is now, its plugins and its FireGraft project. */
+/** The open mod's files for the engine: every file it provides as it is now, and its code (`handedFiles`). */
 export async function engineFiles(s: EngineSession): Promise<EngineFile[]> {
-  const out: EngineFile[] = [];
-  for (const k of s.members()) {
-    if (!s.has(k)) continue;
-    let bytes: Uint8Array | null = null;
-    // (a member its archive lists and does not hold: left out, as the hash leaves it)
-    try { bytes = await s.read(k); } catch { /* left out */ }
-    if (bytes) out.push({ path: livePath(s.nameOf(k)), bytes });
-  }
-  const leaf = (n: string) => n.split(/[\\/]/).pop()!;
-  // (A plugin inside the mod's archive is not loaded by the play page, and is not in the mod's hash: left out.)
-  for (const p of s.source.plugins) if (!p.member) out.push({ path: `plugins/${leaf(p.name)}`, bytes: await p.read() });
-  for (const p of s.source.firegraft) if (/\.(fgp|fgd)$/i.test(p.name)) out.push({ path: `firegraft/${leaf(p.name)}`, bytes: await p.read() });
-  return out;
+  return handedFiles(s.source, s.members().filter((k) => s.has(k)), (k) => s.read(k), (k) => s.nameOf(k));
 }
 
 /**

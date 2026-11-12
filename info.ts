@@ -2,27 +2,10 @@
  * What a mod is, in one line, as `scmjs mod info` says it: its name, where it came from, its files by kind, and which
  * tables are wider than the game's. Read from names and sizes only; nothing is decoded.
  */
-import { DAT_SCHEMAS, datShape, datTableOf, gameName } from "@scm-js/core";
-import { t } from "./i18n";
-import { gameCopies, type ModSource } from "./source";
-
-/** The kinds of file a mod changes, in the order they are named (the command line and the play page name them alike). */
-export const MOD_KINDS = ["tables", "scripts", "pictures", "sounds", "terrain", "strings", "AI", "maps", "other"] as const;
-export type ModKind = (typeof MOD_KINDS)[number];
-
-export function kindOf(name: string): ModKind {
-  const lower = gameName(name);
-  const [top] = lower.split("\\");
-  if (/^scripts\\(aiscript|bwscript)\.bin$/.test(lower)) return "AI";
-  if (top === "scripts") return "scripts";
-  if (top === "arr") return lower.endsWith(".tbl") ? "strings" : /\.dat(ex)?$/.test(lower) ? "tables" : "other";
-  if (top === "tileset") return "terrain";
-  if (top === "maps" || /\.sc[mx]$/.test(lower)) return "maps";
-  if (/\.(wav|ogg)$/.test(lower) || top === "sound" || top === "music") return "sounds";
-  if (lower.endsWith(".tbl") || top === "font") return "strings";
-  if (/\.(grp|pcx|lo[a-z]|dds|anim|smk|spk|bmp|png)$/.test(lower) || ["unit", "game", "dlgs", "cursor", "portrait"].includes(top)) return "pictures";
-  return "other";
-}
+import { DAT_SCHEMAS } from "@scm-js/core";
+import { MOD_KINDS, gameCopyText, kindOf, tableShape, type ModKind } from "@scm-js/mod";
+import { modWords, t } from "./i18n";
+import type { ModSource } from "./source";
 
 export interface ModSummary {
   files: number;
@@ -40,10 +23,9 @@ export function summarize(source: ModSource): ModSummary {
     const k = kindOf(f.name);
     kinds[k] = (kinds[k] ?? 0) + 1;
     bytes += f.size;
-    const table = /^arr\\[^\\]+\.dat(?:ex)?$/.test(gameName(f.name)) ? datTableOf(f.name) : null;
-    if (!table || source.kind === "mod folder") continue;
-    const shape = datShape(table, f.size, f.name);
-    if (shape && shape.layout !== "dat") extended.push({ member: f.name, entries: shape.count, layout: shape.layout });
+    if (source.kind === "mod folder") continue;
+    const shape = tableShape(f.name, f.size);
+    if (shape?.extended && shape.entries !== null && (shape.layout === "expanded" || shape.layout === "datex")) extended.push({ member: f.name, entries: shape.entries, layout: shape.layout });
   }
   extended.sort((a, b) => (a.member < b.member ? -1 : 1));
   return { files: source.files.size, bytes, kinds, extended };
@@ -101,10 +83,7 @@ export function foundLine(source: ModSource): string {
   return parts.join(" ");
 }
 
-/** What was left out as a copy of the game handed over with the mod, a sentence a copy; "" when there was none. */
+/** What was left out as a copy of the game handed over with the mod, a sentence a copy (`@scm-js/mod`'s); "" when there was none. */
 export function gameCopyNotice(source: ModSource): string {
-  return gameCopies(source.gameCopy).map(({ folder, names }) => {
-    const list = names.slice(0, 6).join(", ") + (names.length > 6 ? ` ${t("and {n} more", { n: num(names.length - 6) })}` : "");
-    return t("{folder} is a copy of the game. Its own archives ({list}) are not part of the mod and were left out.", { folder: folder || source.name, list });
-  }).join(" ");
+  return gameCopyText(source.gameCopy, source.name).map(modWords).join(" ");
 }

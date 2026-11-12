@@ -1,96 +1,26 @@
 /**
- * A mod as the person hands it over, opened into its files by the game's names: a folder of loose files (the game's
- * paths at its root or a folder down), one `.mpq`, a self-executing `.exe` (MPQDraft's or FireGraft's — its archive
- * read, nothing run), a `.zip` of any of these, or a folder `scmjs mod unpack` wrote (its text packed back as each
- * file is asked for). Archives are laid first, in the order found, and loose files over them, the later winning as the
- * game layers its own archives. This is the command line's `mod/source.ts` for a page: the pieces come from a drop or
- * a picker instead of the disk. No DOM is needed, so the tests run it in Node.
+ * A mod as the person hands it over, opened into its files by the game's names: a folder of loose files, one `.mpq`, a
+ * self-executing `.exe` (MPQDraft's or FireGraft's — its archive read, nothing run), a `.zip` of any of these, or a
+ * folder `scmjs mod unpack` wrote (its text packed back as each file is asked for).
+ *
+ * What a mod is — which of what was given are its files and from which layer, which are its code, which are left out
+ * (an operating system's files, a copy of the game, a read-me beside the game's folders), its name and what it goes by
+ * between people — is `@scm-js/mod`'s `readMod`, the reader the command line, the editor and the play page share. Here
+ * the pieces become its `ModFiles`, and its description becomes what the editing session keeps: each file with a way to
+ * read it, the code it carries, and its `identity`. A text folder is this plugin's own (the reader recognises one and
+ * leaves it to be packed): its members are packed here, by `@scm-js/core`'s folder form. No DOM is needed, so the
+ * tests run it in Node.
  */
-import { Archive } from "mopaq";
-import { t } from "./i18n";
-import { normalizeRaces, type DataSetRace } from "./races";
 import {
-  DAT_SCHEMAS, DAT_TABLES, GAME_FOLDERS, MOD_MANIFEST, decodeTblFile, entryText, exeArchive, gameName, isMpq, isZip, memberOf, modRoot, namesOf, packFile, readManifest, readZip,
+  ModError, firegraftBytes, fileReaders, gameCopyFolders, gameName as lineName, hasCodeLine, isSystemFile, isZip, leafOf, modIdentity, moduleBytes, normalizeRaces, openLayer,
+  readMod, readZip,
+  type DataSetRace, type Identity, type Layer, type ModDescription, type ModFiles, type ModMessage, type OpenArchives, type UnhashedDescription,
+} from "@scm-js/mod";
+import { t, modWords } from "./i18n";
+import {
+  DAT_SCHEMAS, DAT_TABLES, MOD_MANIFEST, decodeTblFile, gameName, memberOf, namesOf, packFile, readManifest,
   decodeDat, datTableOf, type DatTableName, type ModData, type ModManifest, type ModNames,
 } from "@scm-js/core";
-
-/**
- * Files an operating system or its file manager leaves in folders, and into the archives and zips made of them: never
- * the game's, so never a mod's. Told by name alone, any case: `desktop.ini` (Windows Explorer's settings for a folder),
- * `Thumbs.db`, `ehthumbs.db`, `ehthumbs_vista.db` (its caches of thumbnails), `.DS_Store` and `Icon\r` (the macOS
- * Finder's), `._<name>` (the AppleDouble half of a file) and everything under `__MACOSX/` (the folder macOS's zips
- * keep those in), `.directory` (KDE's).
- *
- * They are left out of the mod's files here, and so out of its hash, its counts and what a page is handed: the mod's
- * hash has no line for one (`@scm-js/core`'s `SYSTEM_FILES`, the same list, from the release after 0.13.0, whose
- * `modHashOfDigests` drops such a line itself). Why: the same folder is not handed over alike by every route. A folder
- * picked with the browser's folder picker, or dropped and read through its handle, never shows `desktop.ini` or
- * `Thumbs.db` (Chromium refuses the names); a drop read through its entries, a folder input and the command line do.
- */
-export const SYSTEM_FILES = {
-  names: ["desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db", ".ds_store", "icon\r", ".directory"],
-  prefixes: ["._"],
-  folders: ["__macosx"],
-} as const;
-
-/** Whether a path (either slash, any case) is one of `SYSTEM_FILES`: by its file name, or by a folder it is under. */
-export function isSystemFile(path: string): boolean {
-  const parts = path.toLowerCase().split(/[\\/]/).filter(Boolean);
-  const name = parts.pop() ?? "";
-  return (SYSTEM_FILES.names as readonly string[]).includes(name)
-    || SYSTEM_FILES.prefixes.some((p) => name.startsWith(p))
-    || parts.some((folder) => (SYSTEM_FILES.folders as readonly string[]).includes(folder));
-}
-
-/*
- * A copy of the game in what was handed over is not the mod. A mod's makers may ship the game beside it (Cosmonarchy's
- * `Release/` beside a whole 1.16.1 `Starcraft/`); laid as layers, the game's archives would be taken for the mod's
- * files, the last found winning — original StarCraft's `iscript.bin` from `StarDat.mpq` over the mod's. A folder that
- * holds a `StarDat.mpq` is such a copy: its `GAME_ARCHIVES`, and everything under its `Maps` folder (the person's maps
- * folder, which the game lists from disk and reads no mod's data by), are the game's own and left out unread. Anything
- * else in it is taken as before.
- *
- * `@scm-js/core` gets the same list and function in the release after 0.13.1 (the command line and the play page tell a
- * copy of the game the same way); a copy here so the plugin is right with the core on npm today.
- */
-/** The game's own archives, by file name (lower case): what a 1.16.1 installation holds beside its program. */
-export const GAME_ARCHIVES = ["stardat.mpq", "broodat.mpq", "patch_rt.mpq", "starcraft.mpq", "broodwar.mpq"] as const;
-
-/** The files among `paths` (forward slashes) that are a copy of the game's own and so no part of a mod: in every folder
- *  that holds a `StarDat.mpq`, that folder's `GAME_ARCHIVES` and every file under its `Maps` folder. */
-export function gameCopyFiles(paths: readonly string[]): Set<string> {
-  const dir = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
-  const leaf = (p: string) => p.slice(p.lastIndexOf("/") + 1).toLowerCase();
-  const copies = new Set(paths.filter((p) => leaf(p) === "stardat.mpq").map((p) => dir(p).toLowerCase()));
-  const out = new Set<string>();
-  if (!copies.size) return out;
-  for (const p of paths) {
-    if (copies.has(dir(p).toLowerCase()) && (GAME_ARCHIVES as readonly string[]).includes(leaf(p))) { out.add(p); continue; }
-    for (const c of copies) if (p.toLowerCase().startsWith(c ? `${c}/maps/` : "maps/")) { out.add(p); break; }
-  }
-  return out;
-}
-
-/**
- * The copies of the game a source's `gameCopy` paths came from: each copy's folder as it was handed over (`""` for the
- * root of what was handed over) and the names of its files left out — the game's archives first, in `GAME_ARCHIVES`'
- * order, then those under `Maps` by path.
- */
-export function gameCopies(gameCopy: readonly string[]): { folder: string; names: string[] }[] {
-  const dir = (p: string) => p.slice(0, Math.max(0, p.lastIndexOf("/")));
-  const name = (p: string) => p.slice(p.lastIndexOf("/") + 1);
-  const folders = [...new Set(gameCopy.filter((p) => name(p).toLowerCase() === "stardat.mpq").map(dir))].sort((a, b) => b.length - a.length);
-  const rank = (p: string) => { const i = (GAME_ARCHIVES as readonly string[]).indexOf(name(p).toLowerCase()); return i < 0 ? GAME_ARCHIVES.length : i; };
-  const by = new Map<string, string[]>();
-  for (const p of gameCopy) {
-    const folder = folders.find((f) => !f || p.toLowerCase().startsWith(`${f.toLowerCase()}/`)) ?? dir(p);
-    by.set(folder, [...(by.get(folder) ?? []), p]);
-  }
-  return [...by].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([folder, paths]) => ({
-    folder,
-    names: paths.sort((a, b) => rank(a) - rank(b) || (a < b ? -1 : a > b ? 1 : 0)).map(name),
-  }));
-}
 
 /** A file as it was handed over: its path (forward slashes, folders included) and a way to read it. */
 export interface Piece {
@@ -101,191 +31,222 @@ export interface Piece {
 
 /** One of the mod's files, by the game's name. */
 export interface ModFile {
-  /** The name as the source spells it (`arr\units.datex`). */
+  /** The name as the source spells it (`arr\units.dat`). */
   name: string;
   size: number;
   read(): Promise<Uint8Array>;
   /** The layer it came from (an archive, `mpq/`, a folder file). */
   layer: string;
+  /** The name its line in the mod's hash goes by: the reader's game name (`Identity.lines`). */
+  line: string;
 }
 
-/** A plugin or FireGraft file the mod carries: kept, never run. `member` when it was inside the mod's archive. */
-export interface Carried { name: string; bytes: number; read(): Promise<Uint8Array>; member?: string; layer: string }
+/**
+ * A plugin, library or FireGraft file the mod carries: kept, never run. `member` when it was inside the mod's archive
+ * (a plugin there is loaded by no loader and has no line in the mod's hash). `line`: the name its line in the hash goes
+ * by (`Identity.plugins`), for a module of the mod's code that has one. `bytes`: its size (0 for a plugin inside the
+ * archive, whose size the reader does not give).
+ */
+export interface Carried { name: string; bytes: number; read(): Promise<Uint8Array>; member?: string; layer: string; line?: string }
 
 export type SourceKind = "mod folder" | "folder" | "archive" | "exe" | "zip";
 
 export interface ModSource {
   kind: SourceKind;
   name: string;
-  /** The layers, in load order. */
+  /** The layers, in load order (the later wins). */
   layers: string[];
   /** The mod's files by the game's name (lower case, backslashes). */
   files: Map<string, ModFile>;
+  /**
+   * The modules of its code: plugins, plugins that load plugins and the libraries they map (given as files or carried
+   * in a patcher exe), then the plugins inside its archive.
+   */
   plugins: Carried[];
   firegraft: Carried[];
   exes: { file: string; kind: "sempq" | "firegraft"; at: number; plugins: { id: number; size: number }[] }[];
   /** Two files of a folder for one game path (any case): the later is used. */
   duplicates: string[];
-  /** Files that are not the game's (a read-me beside the game's folders, an operating system's `desktop.ini`), left out. */
+  /** Files that are not the mod's (a read-me beside the game's folders, an operating system's `desktop.ini`), left out. */
   left: string[];
-  /** Files of a copy of the game handed over with the mod (`gameCopyFiles`), left out unread: the game's, not the mod's. */
+  /** The archives of a copy of the game handed over with the mod, left out unread: the game's, not the mod's. */
   gameCopy: string[];
   /** Archives with no list of their files, read by the names the game uses. */
   probed: string[];
   /** A text folder's manifest (`mod.json`); null for anything else. */
   manifest: ModManifest | null;
   /**
-   * The races the mod adds, as a `mod.json` at the top of what was handed over declares them (`races`, normalized; a row
-   * that is no race left out). Empty when none are declared. No file of the mod's: they never reach its hash.
+   * The races the mod adds, as its `mod.json` declares them (`races`, normalized). Empty when none are declared. No file
+   * of the mod's: they never reach its hash.
    */
   races: DataSetRace[];
+  /**
+   * What the mod goes by, once it is known: as the reader worked it out when the mod opened, or later (`identify`). Null
+   * until then: a large mod is described at once and its files hashed afterwards, and a text folder's is its members
+   * packed (`identityOf`).
+   */
+  identity: Identity | null;
+  /** The mod's identity as it opened, worked out once when first asked (at once where `identity` is known); it sets `identity`. */
+  identify(): Promise<Identity>;
+  /** Lets go of the archives the mod's files are read from (the mod is closed); a later read opens them again. */
+  close(): void;
 }
 
 export class OpenError extends Error {}
 
 export function emptySource(kind: SourceKind, name: string): ModSource {
-  return { kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null, races: [] };
+  const source: ModSource = {
+    kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null, races: [], identity: null,
+    identify: () => Promise.reject(new Error("not yet")),
+    close: () => {},
+  };
+  source.identify = once(() => (source.identity ? Promise.resolve(source.identity) : identityOf(source)), source);
+  return source;
 }
 
-/** The names the game reads, to look for in an archive that has no list of its files. */
-function probeNames(archive: Archive): string[] {
-  const names = new Set<string>();
-  for (const t of DAT_TABLES) { names.add(DAT_SCHEMAS[t].file); names.add(`${DAT_SCHEMAS[t].file}ex`); }
-  for (const n of ["rez\\stat_txt.tbl", "rez\\unitnames.tbl", "arr\\images.tbl", "arr\\sfxdata.tbl", "arr\\portdata.tbl", "arr\\mapdata.tbl", "scripts\\iscript.bin", "scripts\\aiscript.bin", "scripts\\bwscript.bin", "unit\\cmdbtns\\cmdicons.grp", "unit\\cmdbtns\\ticon.pcx", "unit\\cmdbtns\\uniticons.grp", "game\\tunit.pcx", "game\\tselect.pcx", "game\\tminimap.pcx", "game\\tblink.pcx"]) names.add(n);
-  for (const t of ["badlands", "platform", "install", "ashworld", "jungle", "desert", "ice", "twilight"]) for (const ext of ["cv5", "vf4", "vr4", "vx4", "vx4ex", "wpe", "grp", "dddata.dat"]) names.add(ext.includes(".") ? `tileset\\${t}\\${ext}` : `tileset\\${t}.${ext}`);
-  for (const [tbl, under] of [["arr\\images.tbl", "unit\\"], ["arr\\sfxdata.tbl", "sound\\"]] as const) {
-    try { for (const s of decodeTblFile(archive.readFile(tbl)).strings) { const p = entryText(s); if (p) names.add(under + p); } } catch { /* not in this archive */ }
-  }
-  return [...names].filter((n) => { try { return !!archive.fileInfo(n); } catch { return false; } });
+/** `work` done once, its identity kept on the source. */
+function once(work: () => Promise<Identity>, source: { identity: Identity | null }): () => Promise<Identity> {
+  let made: Promise<Identity> | null = null;
+  return () => (made ??= work().then((id) => (source.identity = id)));
 }
+
+/**
+ * From this much handed over (bytes, all pieces together), the mod is described without hashing its files, and its hash
+ * follows: `readMod` with `hashFiles: false`, then `modIdentity` when the hash is first asked for (`identify`). Below it,
+ * the hash comes with the description. 64 MB is the size up to which this plugin worked out a mod's hash before
+ * handing the mod to the editor, before it read mods with `@scm-js/mod`: hashing that much (reading each file,
+ * inflating an archive's members, SHA-256) takes well under a second, where a release of 2.6 GB takes about two seconds
+ * more than describing it in Node. The size of what was handed over is all that is known before reading.
+ */
+export const HASH_LATER = 64 * 1024 * 1024;
 
 const leaf = (p: string) => p.split("/").pop()!;
 
+/** What the reader refused, in the editor's language. */
+function refused(e: unknown): never {
+  if (e instanceof ModError) throw new OpenError(modWords(e.detail));
+  throw e;
+}
+
 /**
  * Opens what was handed over. `name` is what the person called it (a folder's or a file's name); a mod's own
- * `mod.json`, or the one exe of a folder that holds an archive, names it better and wins. `base` reads the game's own
- * files by member name, for a text folder whose AI script names units by the game's string tables.
+ * `mod.json`, or the one program at the top of a folder that holds the mod, names it better and wins. `base` reads the
+ * game's own files by member name, for a text folder whose AI script names units by the game's string tables.
+ * `progress` hears how far the reader is (every file of the mod is read once, for its hash).
  */
-export async function openPieces(pieces: Piece[], name: string, base: ((member: string) => Promise<Uint8Array | null>) | null = null): Promise<ModSource> {
+export async function openPieces(pieces: Piece[], name: string, base: ((member: string) => Promise<Uint8Array | null>) | null = null, progress?: (message: ModMessage) => void): Promise<ModSource> {
   if (!pieces.length) throw new OpenError(t("Nothing was handed over."));
   const textFolder = await findTextFolder(pieces);
   if (textFolder) return openTextFolder(textFolder.root, textFolder.manifest, pieces, name, base);
   const single = pieces.length === 1 && !pieces[0].path.includes("/");
-  // A zip may hold a text folder (Save as Folder writes one): looked into before it is taken as the game's files.
-  if (single && /\.zip$/i.test(pieces[0].path)) {
+  let given = pieces;
+  if (single) {
+    // (read once: the reader is handed these bytes)
     const bytes = await pieces[0].read();
-    if (!isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
-    let members;
-    try { members = readZip(bytes); } catch (e) { throw new OpenError(t("{file}: {error}", { file: pieces[0].path, error: (e as Error).message })); }
-    const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
-    const folder = await findTextFolder(inside);
-    if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
+    given = [{ path: pieces[0].path, size: bytes.length, read: async () => bytes }];
+    // A zip may hold a text folder (Save as Folder writes one): looked into before it is read as a mod.
+    if (/\.zip$/i.test(pieces[0].path) && isZip(bytes)) {
+      let members: ReturnType<typeof readZip> = [];
+      try { members = readZip(bytes); } catch (e) { refused(e); }
+      const inside = members.map((m) => ({ path: m.path, size: m.size, read: m.read }));
+      const folder = await findTextFolder(inside);
+      if (folder) return openTextFolder(folder.root, folder.manifest, inside, name.replace(/\.zip$/i, ""), base);
+    }
+  }
+  const byPath = new Map(given.map((p) => [p.path, p]));
+  const tree: ModFiles = {
+    name: single ? name.replace(/\.(mpq|exe|zip)$/i, "") : name,
+    ...(single ? { named: given[0].path } : {}),
+    list: async () => given.map((p) => ({ path: p.path, size: p.size })),
+    read: async (path) => byPath.get(path)!.read(),
+  };
+  // (every archive the reader opens is kept here, and read from again by everything after it: none is opened twice)
+  const archives: OpenArchives = new Map();
+  const later = given.reduce((n, p) => n + p.size, 0) >= HASH_LATER;
+  let d: ModDescription | UnhashedDescription, identity: Identity | (() => Promise<Identity>);
+  try {
+    if (later) {
+      const unhashed = await readMod(tree, { progress, archives, hashFiles: false });
+      d = unhashed;
+      identity = () => modIdentity(tree, unhashed, { archives });
+    } else {
+      const hashed = await readMod(tree, { progress, archives });
+      d = hashed;
+      identity = hashed.identity;
+    }
+  } catch (e) { return refused(e); }
+  // A copy of the game with nothing of a mod beside it; nothing of a mod at all.
+  const copyOnly = d.said.find((m) => m.key === "copy-only");
+  if (copyOnly) throw new OpenError(modWords(copyOnly));
+  if (!d.files.length && !d.modules.length && !d.patches.length) {
+    const none = d.said.find((m) => m.key === "no-game-files");
+    throw new OpenError(single || !none ? t("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: single ? pieces[0].path : name }) : modWords(none));
   }
   const lower = pieces[0].path.toLowerCase();
-  const kind: SourceKind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") ? "exe" : "archive";
-  if (single) {
-    const bytes = await pieces[0].read();
-    if (kind === "zip" && !isZip(bytes)) throw new OpenError(t("{file} is not a zip.", { file: pieces[0].path }));
-    if (kind === "archive" && !isMpq(bytes)) throw new OpenError(t("{file} is not a mod: not an MPQ, a self-executing exe or a zip.", { file: pieces[0].path }));
-    const piece: Piece = { path: pieces[0].path, size: bytes.length, read: async () => bytes };
-    return fromPieces(kind, name.replace(/\.(mpq|exe|zip)$/i, ""), [piece]);
-  }
-  return fromPieces(kind, name, pieces);
+  const program = single && d.layers.some((l) => l.kind === "archive" && l.path === given[0].path && l.by !== "mpqdraft" && l.by !== "replacement");
+  const kind: SourceKind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") || program ? "exe" : "archive";
+  return fromDescription(kind, tree, d, archives, identity);
 }
 
-async function fromPieces(kind: SourceKind, name: string, pieces: Piece[]): Promise<ModSource> {
-  const source = emptySource(kind, name);
-  const loose: Piece[] = [];
-  const archives: { label: string; archive: Archive }[] = [];
-  let modName: string | null = null;
-  let races: DataSetRace[] = [];
-  const take = async (list: Piece[], depth: number): Promise<void> => {
-    // A copy of the game among several pieces (a folder's, a zip's members) is left out unread; the one file the person
-    // named (an old mod's lone `patch_rt.mpq`) is opened as it is.
-    const copy = depth === 0 && kind !== "folder" ? new Set<string>() : gameCopyFiles(list.map((p) => p.path));
-    for (const p of list) {
-      const l = leaf(p.path).toLowerCase();
-      // (An operating system's file is nothing of the mod's, whatever its name ends in: macOS's `._gptp.qdp` is no plugin.)
-      if (isSystemFile(p.path)) { source.left.push(p.path); continue; }
-      // (An archive of the copy is named in `gameCopy`, which the notice lists; a map or a campaign's music under its
-      // `Maps` folder is left out as any file outside the mod is.)
-      if (copy.has(p.path)) { (/\.(mpq|exe|zip)$/i.test(p.path) ? source.gameCopy : source.left).push(p.path); continue; }
-      if (/\.(qdp|bwl)$/.test(l)) { source.plugins.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
-      if (/\.(fgp|fgd)$/.test(l)) { source.firegraft.push({ name: p.path, bytes: p.size, read: p.read, layer: p.path }); continue; }
-      if (l === "mod.json" && p.path.split("/").length <= 2) {
-        try {
-          const json = JSON.parse(new TextDecoder().decode(await p.read()));
-          const n = json?.name;
-          if (typeof n === "string" && n.trim()) modName = n.trim();
-          const declared = normalizeRaces(json?.races);
-          if (declared.length) races = declared;
-        } catch { /* not ours to read */ }
-        continue;
-      }
-      if (!/\.(zip|mpq|exe)$/.test(l)) { loose.push(p); continue; }
-      const bytes = await p.read();
-      if (l.endsWith(".zip") && isZip(bytes)) {
-        if (depth > 2) continue;
-        let members;
-        try { members = readZip(bytes); } catch (e) { throw new OpenError(t("{file}: {error}", { file: p.path, error: (e as Error).message })); }
-        const prefix = list.length === 1 && depth === 0 ? "" : p.path.replace(/\.zip$/i, "") + "/";
-        await take(members.map((m) => ({ path: `${prefix}${m.path}`, size: m.size, read: m.read })), depth + 1);
-      } else if (l.endsWith(".mpq") && isMpq(bytes)) {
-        try { archives.push({ label: p.path, archive: Archive.open(bytes) }); } catch (e) { throw new OpenError(t("{file} could not be opened as an archive: {error}", { file: p.path, error: (e as Error).message })); }
-      } else if (l.endsWith(".exe")) {
-        const found = exeArchive(bytes);
-        if (!found) { source.left.push(p.path); continue; }
-        try { archives.push({ label: p.path, archive: Archive.open(found.archive) }); } catch (e) { throw new OpenError(t("The archive inside {file} could not be opened: {error}", { file: p.path, error: (e as Error).message })); }
-        source.exes.push({ file: p.path, kind: found.kind, at: found.at, plugins: found.plugins });
-      } else loose.push(p);
-    }
-  };
-  await take(pieces, 0);
-
-  for (const { label, archive } of archives) {
-    source.layers.push(label);
-    // A list of the archive's files may be partial (Blizzard's own are): the names the game reads are looked for too.
-    const listed = (archive.files() ?? []).filter((n) => !n.startsWith("("));
-    if (!listed.length) source.probed.push(label);
-    const seen = new Set(listed.map(gameName));
-    for (const n of [...listed, ...probeNames(archive).filter((n) => !seen.has(gameName(n)))]) {
-      const info = archive.fileInfo(n);
-      if (!info) continue;
-      const read = async () => archive.readFile(n);
-      const key = gameName(n);
-      // (An archive packed from a folder Explorer had been in holds its desktop.ini too: not the mod's.)
-      if (isSystemFile(key)) continue;
-      if (/\.(qdp|bwl)$/.test(key)) { source.plugins.push({ name: n.split("\\").pop()!, bytes: info.uncompressedSize, read, member: n, layer: label }); continue; }
-      if (/\.(fgp|fgd)$/.test(key)) { source.firegraft.push({ name: n.split("\\").pop()!, bytes: info.uncompressedSize, read, member: n, layer: label }); continue; }
-      source.files.set(key, { name: n, size: info.uncompressedSize, read, layer: label });
-    }
+/**
+ * The reader's description as the session keeps it: each file with a way to read it, the code, what was left out.
+ * `archives`: those the reader opened, which every read after it takes from. `identity`: the description's, or how it
+ * is worked out for a mod described without hashing.
+ */
+function fromDescription(kind: SourceKind, tree: ModFiles, d: ModDescription | UnhashedDescription, archives: OpenArchives, identity: Identity | (() => Promise<Identity>)): ModSource {
+  const source = emptySource(kind, d.name);
+  if (typeof identity === "function") source.identify = once(identity, source);
+  else source.identity = identity;
+  source.races = d.races ?? [];
+  const label = (l: Layer) => (l.kind === "archive" ? l.path : l.path ? `${l.path}/` : "./");
+  source.layers = d.layers.map(label);
+  source.probed = d.layers.filter((l) => l.probed).map((l) => l.path);
+  const readerOf = fileReaders(tree, d, { archives });
+  source.close = () => { readerOf.close(); archives.clear(); };
+  for (const f of d.files) {
+    const l = d.layers[f.layer];
+    const name = l.kind === "archive" ? f.member! : (l.path ? f.path!.slice(l.path.length + 1) : f.path!).replace(/\//g, "\\");
+    source.files.set(gameName(f.name), { name, size: f.size, read: readerOf(f), layer: label(l), line: f.name });
   }
-  const root = modRoot(loose.map((p) => p.path));
-  const layer = root ? `${root}/` : "./";
-  if (loose.some((p) => !root || p.path.startsWith(root + "/"))) source.layers.push(layer);
-  for (const p of loose) {
-    if (root && !p.path.startsWith(root + "/")) { source.left.push(p.path); continue; }
-    const rel = root ? p.path.slice(root.length + 1) : p.path;
-    // A file beside the game's folders (a read-me, notes) is not one of the game's.
-    if (!rel.includes("/")) { source.left.push(p.path); continue; }
-    const key = gameName(rel);
-    const was = source.files.get(key);
-    if (was && was.layer === layer) source.duplicates.push(`${was.name} and ${rel.replace(/\//g, "\\")}`);
-    source.files.set(key, { name: rel.replace(/\//g, "\\"), size: p.size, read: p.read, layer });
+  // The code: every module with a line in the hash (a plugin, a plugin that loads plugins, a library they map; given as
+  // a file or carried in a patcher exe), by the name its line goes by; then the plugins inside an archive, which no
+  // loader loads and which have none.
+  for (const m of d.modules) {
+    if (!hasCodeLine(m)) continue;
+    const s = m.source;
+    const line = d.identity.plugins[m.name] === m.sha256 ? m.name : undefined;
+    source.plugins.push({ name: s.kind === "file" ? s.path : m.name, bytes: m.size, read: () => moduleBytes(tree, m), layer: s.kind === "file" ? s.path : s.kind === "carried" ? s.exe : s.archive, ...(line ? { line } : {}) });
   }
-  // A folder the mod's makers ship holds its launcher: the one exe with an archive in it is named as the mod is.
-  if (kind === "folder" && source.exes.length === 1) source.name = leaf(source.exes[0].file).replace(/\.exe$/i, "");
-  if (modName) source.name = modName;
-  source.races = races;
-  source.gameCopy.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-  // With a copy of the game left out, what else came with it may be only the game's own loose files (a read-me, its
-  // dlls, a zip of shaders): a mod is an archive laid as a layer, a plugin or FireGraft file, or a loose file under one
-  // of the game's folders (`maps` aside, as `modRoot` scores them). Without any of those there is no mod.
-  const underGameFolder = (path: string) => path.toLowerCase().split("/").slice(0, -1).some((f) => f !== "maps" && GAME_FOLDERS.includes(f));
-  if (source.gameCopy.length && !archives.length && !source.plugins.length && !source.firegraft.length && !loose.some((p) => underGameFolder(p.path))) {
-    throw new OpenError(gameCopies(source.gameCopy).map((c) => t("{folder} is a copy of the game, and there is no mod in it.", { folder: c.folder || name })).join(" "));
+  for (const c of d.carried) {
+    const s = c.source;
+    if (s?.kind !== "member") continue;
+    // (read from its archive as the reader opened it. The description gives no size for it, so none is said.)
+    const read = async () => {
+      const layer = d.layers.find((l) => l.kind === "archive" && l.path === s.archive);
+      const bytes = layer ? (await openLayer(tree, layer, { archives })).readFile(s.member) : null;
+      if (!bytes) throw new OpenError(t("{file} gave no {member}.", { file: s.archive, member: s.member }));
+      return bytes;
+    };
+    source.plugins.push({ name: c.name, bytes: 0, read, member: s.member, layer: s.archive });
   }
+  for (const f of d.patches[0]?.files ?? []) {
+    source.firegraft.push({ name: f.path ?? f.name, bytes: f.size, read: () => firegraftBytes(tree, d, f, { archives }), ...(f.member ? { member: f.member } : {}), layer: f.path ?? f.archive ?? "" });
+  }
+  for (const l of d.layers) {
+    if (l.kind !== "archive" || (l.by !== "firegraft-patcher" && l.by !== "mpqdraft-sempq" && l.by !== "self-executing")) continue;
+    const carried = d.modules.filter((m) => m.source.kind === "carried" && m.source.exe === l.path);
+    source.exes.push({ file: l.path, kind: l.by === "firegraft-patcher" ? "firegraft" : "sempq", at: l.at ?? 0, plugins: carried.map((m) => ({ id: m.id ?? 0, size: m.size })) });
+  }
+  source.duplicates = d.duplicates.map((x) => x.paths.join(" and "));
+  source.left = d.left.map((x) => x.path);
+  source.gameCopy = d.gameCopy;
   return source;
+}
+
+/** The copies of the game a source's `gameCopy` came from: each copy's folder as handed over ("" the top) and the
+ *  names of its archives left out, the game's own first (`@scm-js/mod`'s `gameCopyFolders`). */
+export function gameCopies(gameCopy: readonly string[]): { folder: string; names: string[] }[] {
+  return gameCopyFolders(gameCopy).map(({ folder, paths }) => ({ folder, names: paths.map(leafOf) }));
 }
 
 /* ── A folder `scmjs mod unpack` wrote ─────────────────────────────────── */
@@ -304,12 +265,13 @@ async function findTextFolder(pieces: Piece[]): Promise<{ root: string; manifest
 /**
  * The text folder's members, each packed from its file when it is first read (a PNG sheet to a GRP takes a moment,
  * and most members are never asked for). The AI text packs to two members at once; tables and string tables are
- * packed up front when the AI text names units by the mod's own names, as `mod pack` does.
+ * packed up front when the AI text names units by the mod's own names, as `mod pack` does. A plugin or FireGraft file
+ * that sat beside the archive (no `member` in the manifest) is carried as a file beside it, as `mod pack` lays it.
  */
 async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece[], name: string, base: ((member: string) => Promise<Uint8Array | null>) | null): Promise<ModSource> {
   const source = emptySource("mod folder", manifest.name || name);
   source.manifest = manifest;
-  // (`@scm-js/core` 0.13's `readManifest` keeps a key it does not know as it was written, unchecked: read by the rule here.)
+  // (`@scm-js/core` 0.13's `readManifest` keeps a key it does not know as it was written, unchecked: read by the rule.)
   source.races = normalizeRaces((manifest as ModManifest & { races?: unknown }).races);
   source.layers.push(root ? `${root}/` : "./");
   const inside = pieces.filter((p) => !root || p.path.startsWith(root + "/")).map((p) => ({ ...p, path: root ? p.path.slice(root.length + 1) : p.path }));
@@ -325,7 +287,14 @@ async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece
     if (p.path === MOD_MANIFEST) continue;
     if (isSystemFile(p.path)) { source.left.push(p.path); continue; }
     const of = memberOf(p.path, manifest);
-    if (!of) { source.left.push(p.path); continue; }
+    if (!of) {
+      // (a plugin or FireGraft file that was beside the archive: its bytes as they are)
+      const plugin = manifest.plugins.find((c) => !c.member && c.file === p.path), fg = manifest.firegraft.find((c) => !c.member && c.file === p.path);
+      if (plugin) source.plugins.push({ name: plugin.name, bytes: p.size, read: p.read, layer: source.layers[0], line: plugin.name });
+      else if (fg) source.firegraft.push({ name: fg.name, bytes: p.size, read: p.read, layer: source.layers[0] });
+      else source.left.push(p.path);
+      continue;
+    }
     if (of.form === "plugin" || of.form === "firegraft") {
       const member = of.members[0];
       const read = async () => (await pack(p))[0].data;
@@ -338,7 +307,7 @@ async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece
         if (!got) throw new OpenError(t("{file} gave no {member}.", { file: p.path, member }));
         return got.data;
       };
-      source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path });
+      source.files.set(gameName(member), { name: member, size: p.size, read, layer: p.path, line: lineName(member) });
     }
   }
   // The AI text names units as the folder was written: from its own tables and string tables, or the game's.
@@ -359,6 +328,38 @@ async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece
     names = namesOf(tables, { stat: await tbl("rez\\stat_txt.tbl"), unitnames: await tbl("rez\\unitnames.tbl"), images: await tbl("arr\\images.tbl"), sfxdata: await tbl("arr\\sfxdata.tbl"), portdata: null, mapdata: null });
   }
   return source;
+}
+
+/* ── Handed over ───────────────────────────────────────────────────────── */
+
+/**
+ * The mod's files and code as a page is handed them, in the game's paths (`ModFiles.layout` "game"): each file by its
+ * game path (`arr/units.dat`), each module of its code that has a line in the hash under `plugins/` by the name the line
+ * goes by, and its FireGraft files under `firegraft/`. A plugin inside the mod's archive is not handed: no loader loads
+ * it, and it has no line. `read` gives a file as it is now (an edit's bytes); one that cannot be read is left out.
+ */
+export async function handedFiles(source: ModSource, keys: readonly string[], read: (key: string) => Promise<Uint8Array | null>, nameOf: (key: string) => string): Promise<{ path: string; bytes: Uint8Array }[]> {
+  const out: { path: string; bytes: Uint8Array }[] = [];
+  for (const k of keys) {
+    let bytes: Uint8Array | null = null;
+    // (a member its archive lists and does not hold: left out, as the reader leaves it)
+    try { bytes = await read(k); } catch { /* left out */ }
+    if (bytes) out.push({ path: gameName(nameOf(k)).replace(/\\/g, "/"), bytes });
+  }
+  for (const p of source.plugins) if (p.line) out.push({ path: `plugins/${p.line}`, bytes: await p.read() });
+  for (const p of source.firegraft) if (/\.(fgp|fgd)$/i.test(p.name)) out.push({ path: `firegraft/${leafOf(p.name)}`, bytes: await p.read() });
+  return out;
+}
+
+/**
+ * The identity of a mod held as members (a text folder, packed): what the reader gives the same files handed over in
+ * the game's paths (`handedFiles`), which is what it gives the folder packed and saved.
+ */
+export async function identityOf(source: ModSource): Promise<Identity> {
+  const keys = [...source.files.keys()].sort();
+  const files = await handedFiles(source, keys, async (k) => source.files.get(k)!.read(), (k) => source.files.get(k)!.name);
+  const byPath = new Map(files.map((f) => [f.path, f.bytes]));
+  return (await readMod({ name: source.name, layout: "game", list: async () => files.map((f) => ({ path: f.path, size: f.bytes.length })), read: async (p) => byPath.get(p)! })).identity;
 }
 
 /** A folder of a mod: the game's folders (or a mod folder's manifest) at its root or one folder down. */
