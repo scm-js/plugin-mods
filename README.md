@@ -17,8 +17,10 @@ game's files (at its top or a folder or two down, as `mpq/` in a mod's release),
 `.exe` (MPQDraft's or FireGraft's — the archive inside is read, nothing is run), a `.zip` of any of these, or a folder
 that `scmjs mod unpack` wrote. An `.mpq`, `.exe` or `.zip` dropped on the editor itself opens here too. The panel says
 in one line what it found. Which files in what you open are the mod's, what it is called and the hash it goes by are
-read by [`@scm-js/mod`](https://www.npmjs.com/package/@scm-js/mod), the same reader the editor, `scmjs` and the play
-page use, so all of them name a mod alike. Every file of the mod is read once as it opens, for its hash.
+read by [`@scm-js/mod`](https://www.npmjs.com/package/@scm-js/mod), the reader the play page uses, and the editor and
+`scmjs` in their releases after 0.13.3. scmJS 0.13.3 and older give some mods another hash than this: a mod that
+carries a patcher's own plugins or the DLLs its plugins load, for one. Opening reads every file of the mod for its hash: under 64 MB the hash
+comes with it, and a larger mod is shown at once while the status line says its hash is being worked out.
 
 A copy of the game in what you open is not the mod. In a folder that holds `StarDat.mpq`, the game's own archives
 (`StarDat.mpq`, `BrooDat.mpq`, `patch_rt.mpq`, `StarCraft.mpq`, `BroodWar.mpq`) and everything under its `Maps` folder

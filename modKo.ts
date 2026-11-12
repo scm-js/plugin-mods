@@ -1,7 +1,8 @@
 // Korean for every sentence `@scm-js/mod` can produce (`MOD_MESSAGES`), keyed by its English template as the editor's
 // catalogue is: the texts the editor's own catalogue gives them (scm-js `src/i18n/ko.json`). Registered with `KO`, so a
-// message shown through `modWords` reads in the editor's language. `tests/ko.test.ts` checks that every template has
-// one, and nothing else is here.
+// message shown through `modWords` reads in the editor's language. The two "could not be opened" errors show their
+// `reason` (a message, translated) where the English shows the archive library's own text (`why`). `tests/ko.test.ts`
+// checks that every template has one, and nothing else is here.
 export const MOD_KO: Record<string, string> = {
   "  FireGraft project {project} (from {top, select, yes {the top} other {{place}}}){database, select, none {, no database} other { with database {database}}}; lands at the game's first open of {moment} (a game's start, after the plugins' inits)": "  FireGraft 프로젝트 {project} ({top, select, yes {맨 위} other {{place}}}에서){database, select, none {, 데이터베이스 없음} other {, 데이터베이스 {database}}}; 게임이 {moment}을(를) 처음 열 때 적용 (게임 시작 시, 플러그인 초기화 뒤)",
   "  none": "  없음",
@@ -23,6 +24,8 @@ export const MOD_KO: Record<string, string> = {
   "This zip is in the large-zip form (zip64), which this reader does not read: unzip it and give the folder instead.": "이 zip은 큰 zip 형식(zip64)이라 이 읽기 도구로 읽지 못합니다. 압축을 풀고 폴더를 대신 주세요.",
   "This zip's directory is damaged.": "이 zip의 목록이 손상되었습니다.",
   "This zip's directory is not at its end: it may be cut short.": "이 zip의 목록이 끝에 없습니다. 파일이 잘렸을 수 있습니다.",
+  "a file in it is packed in a way this reader does not read ({detail})": "안의 파일 하나가 이 리더가 읽지 못하는 방식으로 압축되어 있습니다({detail})",
+  "a file it needs is not in it ({detail})": "필요한 파일이 안에 없습니다({detail})",
   "a file of plugin {id}'s, handed to it by MPQDraft's server (GetPluginModule)": "플러그인 {id}의 파일. MPQDraft 서버가 그 플러그인에 건넵니다(GetPluginModule)",
   "a library: mapped when a module imports it or asks for it": "라이브러리: 모듈이 가져오거나 요청할 때 올라옵니다",
   "a plugin inside an archive: no loader loads one from there": "아카이브 안의 플러그인: 거기서 불러오는 로더는 없습니다",
@@ -38,10 +41,13 @@ export const MOD_KO: Record<string, string> = {
   "entry {n} of its MPQDraft file system (at byte {at}) runs past the file's end": "MPQDraft 파일 시스템의 항목 {n}({at}바이트 위치)이(가) 파일 끝을 넘어갑니다",
   "files in the game's paths and plugins beside them, which no loader on Windows takes: the mod needs its files laid over the game's and its plugins loaded by name": "게임 경로에 있는 파일과 그 옆의 플러그인. Windows의 어떤 로더도 받지 않으므로, 파일을 게임 파일 위에 깔고 플러그인을 이름으로 불러와야 합니다",
   "identity: hash {hash}, without plugins {withoutPlugins}; {lines} lines and {plugins} plugin lines{older, select, none {} other {; older {older}}}{beforeCode, select, none {} other {; before its code had lines {beforeCode}}}{declared, select, none {} other {; mod.json says {declared}}}; code {code, select, yes {yes} other {no}}; startup data read again {startup, select, yes {yes} other {no}}": "식별: 해시 {hash}, 플러그인 없이 {withoutPlugins}; 줄 {lines}개와 플러그인 줄 {plugins}개{older, select, none {} other {; 이전 {older}}}{beforeCode, select, none {} other {; 코드에 줄이 생기기 전 {beforeCode}}}{declared, select, none {} other {; mod.json에 적힌 값 {declared}}}; 코드 {code, select, yes {있음} other {없음}}; 시작 데이터 다시 읽음 {startup, select, yes {예} other {아니요}}",
+  "it could not be read ({detail})": "읽지 못했습니다({detail})",
   "it has no GetMPQDraftPlugin, which its loader asks for": "로더가 찾는 GetMPQDraftPlugin이 없습니다",
   "it is FireGraft's patcher with {plugins, plural, one {# plugin} other {# plugins}}, and no archive was found after {plugins, plural, =0 {its overlay} other {them}}": "플러그인 {plugins, plural, other {#개}}가 든 FireGraft 패처인데, {plugins, plural, =0 {오버레이} other {플러그인}} 뒤에서 아카이브를 찾지 못했습니다",
   "it is MPQDraft's self-executing form with {files, plural, one {# embedded file} other {# embedded files}}, and no archive was found after them": "내장 파일 {files, plural, other {#개}}가 든 MPQDraft 자체 실행 형식인데, 그 뒤에서 아카이브를 찾지 못했습니다",
+  "it is damaged ({detail})": "손상되었습니다({detail})",
   "it loads the mod's other plugins: the mod needs those plugins loaded in its order, not this plugin itself": "모드의 다른 플러그인을 불러오는 플러그인입니다. 모드에 필요한 것은 이 플러그인이 아니라 그 플러그인들을 순서대로 불러오는 일입니다",
+  "its format version is one this reader does not read ({detail})": "이 리더가 읽지 못하는 형식 버전입니다({detail})",
   "its loader leaves out a name that starts with _": "로더가 _로 시작하는 이름을 뺍니다",
   "its loader loads .qdp files only": "로더가 .qdp 파일만 불러옵니다",
   "its patcher overlay (at byte {at}) is of form {form}; only form {known} is known": "패처 오버레이({at}바이트 위치)의 형식이 {form}입니다. 알려진 형식은 {known}뿐입니다",
@@ -50,6 +56,7 @@ export const MOD_KO: Record<string, string> = {
   "layers (by storm's priority, lowest first: laid in this order, the later winning):": "레이어 (storm 우선순위가 낮은 것부터: 이 순서로 깔고 나중 것이 이김):",
   "loaders (outermost first):": "로더 (바깥쪽부터):",
   "modules (the loader's order):": "모듈 (로더의 순서):",
+  "no archive header is where it should be ({detail})": "아카이브 헤더가 있어야 할 자리에 없습니다({detail})",
   "none: not a Windows image": "없음: Windows 이미지가 아님",
   "patches:": "패치:",
   "plugin {n} of its patcher overlay (at byte {at}) has {value} where every patcher seen has 0: a form this reader does not know": "패처 오버레이의 플러그인 {n}({at}바이트 위치)에 {value}이(가) 있습니다. 지금까지 본 패처는 모두 0이었으므로, 이 읽기 도구가 모르는 형식입니다",
@@ -57,9 +64,10 @@ export const MOD_KO: Record<string, string> = {
   "plugin {n} of its patcher overlay is {size} bytes, and the file ends {left} bytes after its start": "패처 오버레이의 플러그인 {n}은(는) {size}바이트인데, 파일이 그 시작에서 {left}바이트 뒤에 끝납니다",
   "said: {said}": "알림: {said}",
   "string {index} starts past the table's end": "문자열 {index}이(가) 표의 끝 너머에서 시작함",
-  "the archive inside {path} (at byte {at}) could not be opened: {why}": "{path} 안의 아카이브({at}바이트 위치)를 열지 못했습니다: {why}",
+  "the archive inside {path} (at byte {at}) could not be opened: {why}": "{path} 안의 아카이브({at}바이트 위치)를 열지 못했습니다: {reason}",
   "the same plugin as {name}, which is that file": "{name}와 같은 플러그인이고, 그 파일이 이것입니다",
   "turned off": "꺼져 있음",
+  "{detail}": "{detail}",
   "{exe} ({form, select, mpqdraft-sempq {MPQDraft SEMPQ} other {FireGraft patcher}} plugin {named, select, yes {{name}, } other {}}id {id})": "{exe} ({form, select, mpqdraft-sempq {MPQDraft SEMPQ} other {FireGraft 패처}} 플러그인 {named, select, yes {{name}, } other {}}id {id})",
   "{folder} is a copy of the game, and there is no mod in it.": "{folder|은} 게임 사본이고, 그 안에 모드가 없습니다.",
   "{folder} is a copy of the game. Its own archives ({list}{more, plural, =0 {} other { and # more}}) are not part of the mod and were left out.": "{folder|은} 게임 사본입니다. 그 안의 게임 아카이브({list}{more, plural, =0 {} other { 외 #개}})는 모드가 아니라서 뺐습니다.",
@@ -72,7 +80,8 @@ export const MOD_KO: Record<string, string> = {
   "{name}{link, select, none {} other { <{link}>}}{races, select, none {} other {; races {races}}}": "{name}{link, select, none {} other { <{link}>}}{races, select, none {} other {; 종족 {races}}}",
   "{path} cannot be read as a mod: {why}.": "{path|은} 모드로 읽을 수 없습니다: {why}.",
   "{path} cannot be read as a zip: {why}": "{path|을} zip으로 읽을 수 없습니다: {why}",
-  "{path} could not be opened as an archive: {why}": "{path|을} 아카이브로 열지 못했습니다: {why}",
+  "{path} could not be opened as an archive: {why}": "{path|을} 아카이브로 열지 못했습니다: {reason}",
+  "{path} could not be read: {why}": "{path|을} 읽지 못했습니다: {why}",
   "{path} has no list of its files; looking for the game's own names in it…": "{path}에는 파일 목록이 없습니다. 게임 자체의 이름으로 찾는 중…",
   "{path} holds no archive: it is a program only, not a mod's patcher or self-executing archive": "{path}에는 아카이브가 없습니다. 모드의 패처나 자체 실행 아카이브가 아니라 프로그램일 뿐입니다",
   "{path} is encrypted in this zip, and encrypted zips are not read.": "이 zip에서 {path|은} 암호화되어 있습니다. 암호화된 zip은 읽지 않습니다.",
@@ -82,5 +91,6 @@ export const MOD_KO: Record<string, string> = {
   "{path} is {loader}'s own packing of its folder of files (it names it): the folder is laid in its place, at {priority}.": "{path|은} {loader}가 자기 파일 폴더를 묶은 것입니다(이름을 가리킵니다). 대신 그 폴더를 {priority}에 깝니다.",
   "{path} says this is a mod folder in text form (format {format}): its texts and pictures are packed into the game's files before it can be read as a mod.": "{path}에 따르면 이것은 텍스트 형식의 모드 폴더(형식 {format})입니다. 모드로 읽으려면 먼저 텍스트와 그림을 게임 파일로 묶어야 합니다.",
   "{path}: inflated to {got} bytes, where the zip says {size}.": "{path}: 풀었더니 {got}바이트인데, zip에는 {size}바이트라고 되어 있습니다.",
+  "{path}: its packed bytes could not be inflated ({detail}).": "{path}: 압축된 내용을 풀지 못했습니다({detail}).",
   "{path}: its place in the zip is damaged.": "{path}: zip 안의 위치가 손상되었습니다.",
 };

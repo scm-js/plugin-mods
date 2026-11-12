@@ -9,10 +9,10 @@ import {
   entryText, fieldType, gameName, iscriptFromText, iscriptToText, loadModData, namesOf, placeOf, readIscriptHeaders, storedRange,
   type AiNames, type DatField, type DatFile, type DatTableName, type DiffSide, type ModChange, type ModData, type ModFinding, type TblFile,
 } from "@scm-js/core";
-import { gameName as lineName, runningHash, sha256Hex, type Identity } from "@scm-js/mod";
+import { identityWith, sha256Hex } from "@scm-js/mod";
 import { msg, translate, type Params } from "./i18n";
 import { RefIndex } from "./refs";
-import { identityOf, type ModSource } from "./source";
+import type { ModSource } from "./source";
 
 /** A file by the game's name, or null. */
 export type ReadMember = (member: string) => Promise<Uint8Array | null>;
@@ -89,8 +89,6 @@ export class ModSession {
   private opened: ModData | null = null;
   /** Each edited member's SHA-256, until it changes again. */
   private readonly digests = new Map<string, string>();
-  /** What the mod went by as it was opened (the reader's `identity`; a text folder's worked out when first asked). */
-  private identity: Promise<Identity> | null = null;
   /** Whether a member is byte for byte the game's, once asked. */
   private readonly baseSame = new Map<string, boolean>();
 
@@ -530,33 +528,30 @@ export class ModSession {
 
   /**
    * What the mod goes by between people, as it is now: the hash `@scm-js/mod` gives it (`Identity.hash`), the one the
-   * editor, `scmjs mod info` and the play page name it by. Unedited, it is the hash the reader worked out when the mod
-   * opened, and nothing is read. Edited, it is the hash the reader would give the mod saved as it is now: the lines of
-   * the hash as it opened, each member an edit touched with its line for the bytes it has now (a member it gave the mod
-   * a line of its own), and every module of its code with its line, which no edit here changes. Only the touched
-   * members are read, each once until it changes again. A member that cannot be read has no line, as the reader leaves
-   * it out.
+   * editor, `scmjs mod info` and the play page name it by. Unedited, it is the mod's identity as it opened
+   * (`ModSource.identify`: known at once, or worked out the first time for a large mod). Edited, it is the hash the
+   * reader would give the mod saved as it is now (`identityWith`): each member an edit touched by the digest of the
+   * bytes it has now, the code as it came, which no edit here changes. Only the touched members are read, each once
+   * until it changes again. A member that cannot be read has no line, as the reader leaves it out.
    */
   async hash(): Promise<string> {
-    this.identity ??= this.source.identity ? Promise.resolve(this.source.identity) : identityOf(this.source);
-    const id = await this.identity;
+    const id = await this.source.identify();
     const touched = this.touchedMembers();
     if (!touched.length) return id.hash;
-    const lines = new Map(id.lines.map((l) => [l.slice(0, l.indexOf("\t")), l]));
+    const files: Record<string, string | null> = {};
     for (const k of touched) {
-      const name = this.source.files.get(k)?.line ?? lineName(this.nameOf(k));
+      const name = this.source.files.get(k)?.line ?? this.nameOf(k);
       let d = this.digests.get(k);
       if (!d) {
         let bytes: Uint8Array | null = null;
         try { bytes = await this.read(k); } catch { /* left out */ }
-        if (!bytes) { lines.delete(name); continue; }
+        if (!bytes) { files[name] = null; continue; }
         d = await sha256Hex(bytes);
         this.digests.set(k, d);
       }
-      // (a game file's line, as the reader writes it: `@scm-js/mod` exports no maker of one)
-      lines.set(name, `${name}\t${d}`);
+      files[name] = d;
     }
-    return runningHash([...lines.values()], id.plugins, Object.keys(id.plugins));
+    return (await identityWith(id, { files })).hash;
   }
 
   /** Every iscript id the mod's scripts define now, for the completion and the tables' references. */

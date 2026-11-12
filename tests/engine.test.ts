@@ -140,3 +140,37 @@ describe("what the engine's page is handed names the mod as the editor does", ()
     expect(await again.hash()).toBe(await s.hash());
   });
 });
+
+describe("a large mod, and the archives it is read from", () => {
+  const edit = (s: ModSession) => s.setField({ table: "units", id: 0, field: "hit_points", value: 45 * 256 });
+
+  it("described at once, its hash worked out when first asked: the same hash, edited or not", async () => {
+    const { HASH_LATER } = await import("../source");
+    // (a read-me beside the game's folders said to be large: what was handed over is, the mod is not)
+    const large = { path: "made/notes.txt", size: HASH_LATER, read: async () => new TextEncoder().encode("notes") };
+    const now = await open();
+    const later = await ModSession.open(await openPieces([...madeFolder(), large], "made"), { base: null });
+    expect(now.source.identity).not.toBeNull();
+    expect(later.source.identity).toBeNull();
+    // An edit before the hash is known: the hash, when it comes, is the edited mod's.
+    edit(now); edit(later);
+    expect(await later.hash()).toBe(await now.hash());
+    expect(later.source.identity?.hash).toBe((await (await open()).hash()));
+    expect(await pageHash(await engineFiles(later))).toBe(await later.hash());
+  });
+
+  it("opens each archive once for every read after the reader's, a plugin inside it too, and again only after close", async () => {
+    let reads = 0;
+    const archive = await writeMpq([{ member: "unit\\made\\x.grp", data: new Uint8Array([1, 2, 3]) }, { member: "plugins\\inside.qdp", data: new Uint8Array([5]) }]);
+    const s = await open([{ path: "made/mod.mpq", size: archive.length, read: async () => { reads++; return archive; } }]);
+    expect(reads).toBe(1);
+    const inside = s.source.plugins.find((p) => p.member)!;
+    expect(await inside.read()).toEqual(new Uint8Array([5]));
+    expect(s.source.files.get("unit\\made\\x.grp")!.layer).toBe("made/mod.mpq");
+    expect(await s.read("unit\\made\\x.grp")).toEqual(new Uint8Array([1, 2, 3]));
+    expect(reads).toBe(1);
+    s.source.close();
+    expect(await inside.read()).toEqual(new Uint8Array([5]));
+    expect(reads).toBe(2);
+  });
+});

@@ -14,6 +14,7 @@
  */
 import type { FolderFile, GameDataProfile, PanelHandle, PluginApi } from "@scm-js/plugin-api";
 import { DAT_SCHEMAS, createScenario, serializeScenario, type DatTableName, type ModChange, type ModFinding } from "@scm-js/core";
+import { ModError } from "@scm-js/mod";
 import { button, clear, ensureStyle, h } from "./dom";
 import { bindLanguage, modWords, msg, t } from "./i18n";
 import { foundLine, gameCopyNotice, num, sizeText } from "./info";
@@ -30,7 +31,7 @@ import { RacesView } from "./racesView";
 import { ScriptsView } from "./scriptsView";
 import { SoundsView } from "./soundsView";
 import { ModSession } from "./session";
-import { OpenError, looksLikeMod, openPieces, type Piece } from "./source";
+import { HASH_LATER, OpenError, looksLikeMod, openPieces, type Piece } from "./source";
 import { StringsView } from "./stringsView";
 import { GraftsView } from "./graftsView";
 import { LIVE_SERVICE, LiveSender, livePath, type LiveService } from "./live";
@@ -325,6 +326,8 @@ class ModEditor {
     this.dropViews();
     this.look = null;
     const ours = !!this.attached && this.isOurs();
+    // (its archives let go: the mod is closed)
+    this.session?.source.close();
     this.session = null;
     this.races = null;
     this.live.follow(null);
@@ -400,8 +403,9 @@ class ModEditor {
   /**
    * Hands the editor a reader over the mod's current files. The hash (`ModSession.hash`, the mod's identity) is what a
    * map saved now records: it goes with the reader when it is known already (the reader worked it out as the mod
-   * opened) or quick to work out; a large text folder's, which means packing every member, follows by `rehash`, the
-   * editor drawing from the mod meanwhile.
+   * opened) or quick to work out (the mod's files under `HASH_LATER`). Otherwise — a large mod, described without
+   * hashing its files, or a large text folder, whose every member is packed for it — the reader goes without one (the
+   * editor's source says its hash is pending) and the hash follows by `rehash`, the editor drawing from the mod meanwhile.
    */
   private async attach() {
     const gd = this.gameData;
@@ -412,7 +416,7 @@ class ModEditor {
     this.reader = attachReader({ has: (m) => session.has(m), read: (m) => session.read(m) });
     const profile = this.profile();
     const bytes = [...session.source.files.values()].reduce((n, f) => n + f.size, 0);
-    const hash = session.source.identity || bytes < 64 * 1024 * 1024 ? await session.hash() : null;
+    const hash = session.source.identity || bytes < HASH_LATER ? await session.hash() : null;
     if (this.session !== session) return;
     const source = await gd.attach(profile, this.reader, hash ? { hash } : undefined);
     this.attached = { profile, hash, label: this.attachedLabel(source.label, hash) };
@@ -422,7 +426,11 @@ class ModEditor {
     this.status();
     if (!hash) {
       this.say(t("Working out the mod's hash over {size}…", { size: sizeText(bytes) }));
-      const later = await session.hash();
+      let later: string;
+      try { later = await session.hash(); } catch (e) {
+        if (this.session === session) this.say(t("The mod could not be opened: {error}", { error: e instanceof ModError ? modWords(e.detail) : e instanceof Error ? e.message : String(e) }));
+        return;
+      }
       if (this.session !== session || !this.isOurs()) return;
       const again = gd.rehash(later);
       this.attached = { profile, hash: later, label: this.attachedLabel(again?.label ?? source.label, later) };
@@ -471,8 +479,9 @@ class ModEditor {
       } else {
         // Draw from the edit at once, and name it when its digest is ready (only the edited member is read again).
         gd.reload();
-        const hash = await session.hash();
-        if (this.session !== session) return;
+        // (a hash that cannot be worked out is said where it was first asked for, as the mod was attached)
+        const hash = await session.hash().catch(() => null);
+        if (this.session !== session || !hash) return;
         if (hash !== this.attached.hash) {
           const source = gd.rehash(hash);
           this.attached = { profile: this.attached.profile, hash, label: this.attachedLabel(source?.label ?? "", hash) };

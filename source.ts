@@ -12,8 +12,9 @@
  * tests run it in Node.
  */
 import {
-  ModError, firegraftBytes, fileReaders, gameCopyFolders, gameName as lineName, hasCodeLine, isSystemFile, isZip, leafOf, moduleBytes, normalizeRaces, openLayer, readMod, readZip,
-  type DataSetRace, type Identity, type Layer, type ModDescription, type ModFiles, type ModMessage,
+  ModError, firegraftBytes, fileReaders, gameCopyFolders, gameName as lineName, hasCodeLine, isSystemFile, isZip, leafOf, modIdentity, moduleBytes, normalizeRaces, openLayer,
+  readMod, readZip,
+  type DataSetRace, type Identity, type Layer, type ModDescription, type ModFiles, type ModMessage, type OpenArchives, type UnhashedDescription,
 } from "@scm-js/mod";
 import { t, modWords } from "./i18n";
 import {
@@ -79,15 +80,45 @@ export interface ModSource {
    * of the mod's: they never reach its hash.
    */
   races: DataSetRace[];
-  /** What the mod goes by, as the reader worked it out when it opened; null for a text folder (`identityOf` packs it). */
+  /**
+   * What the mod goes by, once it is known: as the reader worked it out when the mod opened, or later (`identify`). Null
+   * until then: a large mod is described at once and its files hashed afterwards, and a text folder's is its members
+   * packed (`identityOf`).
+   */
   identity: Identity | null;
+  /** The mod's identity as it opened, worked out once when first asked (at once where `identity` is known); it sets `identity`. */
+  identify(): Promise<Identity>;
+  /** Lets go of the archives the mod's files are read from (the mod is closed); a later read opens them again. */
+  close(): void;
 }
 
 export class OpenError extends Error {}
 
 export function emptySource(kind: SourceKind, name: string): ModSource {
-  return { kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null, races: [], identity: null };
+  const source: ModSource = {
+    kind, name, layers: [], files: new Map(), plugins: [], firegraft: [], exes: [], duplicates: [], left: [], gameCopy: [], probed: [], manifest: null, races: [], identity: null,
+    identify: () => Promise.reject(new Error("not yet")),
+    close: () => {},
+  };
+  source.identify = once(() => (source.identity ? Promise.resolve(source.identity) : identityOf(source)), source);
+  return source;
 }
+
+/** `work` done once, its identity kept on the source. */
+function once(work: () => Promise<Identity>, source: { identity: Identity | null }): () => Promise<Identity> {
+  let made: Promise<Identity> | null = null;
+  return () => (made ??= work().then((id) => (source.identity = id)));
+}
+
+/**
+ * From this much handed over (bytes, all pieces together), the mod is described without hashing its files, and its hash
+ * follows: `readMod` with `hashFiles: false`, then `modIdentity` when the hash is first asked for (`identify`). Below it,
+ * the hash comes with the description. 64 MB is the size up to which this plugin worked out a mod's hash before
+ * handing the mod to the editor, before it read mods with `@scm-js/mod`: hashing that much (reading each file,
+ * inflating an archive's members, SHA-256) takes well under a second, where a release of 2.6 GB takes about two seconds
+ * more than describing it in Node. The size of what was handed over is all that is known before reading.
+ */
+export const HASH_LATER = 64 * 1024 * 1024;
 
 const leaf = (p: string) => p.split("/").pop()!;
 
@@ -129,8 +160,21 @@ export async function openPieces(pieces: Piece[], name: string, base: ((member: 
     list: async () => given.map((p) => ({ path: p.path, size: p.size })),
     read: async (path) => byPath.get(path)!.read(),
   };
-  let d: ModDescription;
-  try { d = await readMod(tree, progress ? { progress } : {}); } catch (e) { return refused(e); }
+  // (every archive the reader opens is kept here, and read from again by everything after it: none is opened twice)
+  const archives: OpenArchives = new Map();
+  const later = given.reduce((n, p) => n + p.size, 0) >= HASH_LATER;
+  let d: ModDescription | UnhashedDescription, identity: Identity | (() => Promise<Identity>);
+  try {
+    if (later) {
+      const unhashed = await readMod(tree, { progress, archives, hashFiles: false });
+      d = unhashed;
+      identity = () => modIdentity(tree, unhashed, { archives });
+    } else {
+      const hashed = await readMod(tree, { progress, archives });
+      d = hashed;
+      identity = hashed.identity;
+    }
+  } catch (e) { return refused(e); }
   // A copy of the game with nothing of a mod beside it; nothing of a mod at all.
   const copyOnly = d.said.find((m) => m.key === "copy-only");
   if (copyOnly) throw new OpenError(modWords(copyOnly));
@@ -141,18 +185,24 @@ export async function openPieces(pieces: Piece[], name: string, base: ((member: 
   const lower = pieces[0].path.toLowerCase();
   const program = single && d.layers.some((l) => l.kind === "archive" && l.path === given[0].path && l.by !== "mpqdraft" && l.by !== "replacement");
   const kind: SourceKind = !single ? "folder" : lower.endsWith(".zip") ? "zip" : lower.endsWith(".exe") || program ? "exe" : "archive";
-  return fromDescription(kind, tree, d);
+  return fromDescription(kind, tree, d, archives, identity);
 }
 
-/** The reader's description as the session keeps it: each file with a way to read it, the code, what was left out. */
-function fromDescription(kind: SourceKind, tree: ModFiles, d: ModDescription): ModSource {
+/**
+ * The reader's description as the session keeps it: each file with a way to read it, the code, what was left out.
+ * `archives`: those the reader opened, which every read after it takes from. `identity`: the description's, or how it
+ * is worked out for a mod described without hashing.
+ */
+function fromDescription(kind: SourceKind, tree: ModFiles, d: ModDescription | UnhashedDescription, archives: OpenArchives, identity: Identity | (() => Promise<Identity>)): ModSource {
   const source = emptySource(kind, d.name);
-  source.identity = d.identity;
+  if (typeof identity === "function") source.identify = once(identity, source);
+  else source.identity = identity;
   source.races = d.races ?? [];
   const label = (l: Layer) => (l.kind === "archive" ? l.path : l.path ? `${l.path}/` : "./");
   source.layers = d.layers.map(label);
   source.probed = d.layers.filter((l) => l.probed).map((l) => l.path);
-  const readerOf = fileReaders(tree, d);
+  const readerOf = fileReaders(tree, d, { archives });
+  source.close = () => { readerOf.close(); archives.clear(); };
   for (const f of d.files) {
     const l = d.layers[f.layer];
     const name = l.kind === "archive" ? f.member! : (l.path ? f.path!.slice(l.path.length + 1) : f.path!).replace(/\//g, "\\");
@@ -170,18 +220,17 @@ function fromDescription(kind: SourceKind, tree: ModFiles, d: ModDescription): M
   for (const c of d.carried) {
     const s = c.source;
     if (s?.kind !== "member") continue;
-    // (read when asked, its archive opened for it and let go: the files' reader keeps its own copy of the archive. The
-    // description gives no size for it, so none is said.)
+    // (read from its archive as the reader opened it. The description gives no size for it, so none is said.)
     const read = async () => {
       const layer = d.layers.find((l) => l.kind === "archive" && l.path === s.archive);
-      const bytes = layer ? (await openLayer(tree, layer)).readFile(s.member) : null;
+      const bytes = layer ? (await openLayer(tree, layer, { archives })).readFile(s.member) : null;
       if (!bytes) throw new OpenError(t("{file} gave no {member}.", { file: s.archive, member: s.member }));
       return bytes;
     };
     source.plugins.push({ name: c.name, bytes: 0, read, member: s.member, layer: s.archive });
   }
   for (const f of d.patches[0]?.files ?? []) {
-    source.firegraft.push({ name: f.path ?? f.name, bytes: f.size, read: () => firegraftBytes(tree, d, f), ...(f.member ? { member: f.member } : {}), layer: f.path ?? f.archive ?? "" });
+    source.firegraft.push({ name: f.path ?? f.name, bytes: f.size, read: () => firegraftBytes(tree, d, f, { archives }), ...(f.member ? { member: f.member } : {}), layer: f.path ?? f.archive ?? "" });
   }
   for (const l of d.layers) {
     if (l.kind !== "archive" || (l.by !== "firegraft-patcher" && l.by !== "mpqdraft-sempq" && l.by !== "self-executing")) continue;
