@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@scm-js/core": "^0.13.0",
-    "@scm-js/mod": "^1.1.1",
+    "@scm-js/mod": "^1.2.0",
     "mopaq": "^1.6.2"
   },
   "devDependencies": {
