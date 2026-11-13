@@ -17657,7 +17657,10 @@ var KO = {
   "(the game's)": "(\uAC8C\uC784\uC758 \uAC83)",
   ", converted to 22050 Hz, 16-bit, mono": ", 22050 Hz \xB7 16\uBE44\uD2B8 \xB7 \uBAA8\uB178\uB85C \uBCC0\uD658",
   "; {k} kept as bytes (mod.json says why)": "; {k}\uAC1C\uB294 \uBC14\uC774\uD2B8 \uADF8\uB300\uB85C \uB460 (\uC774\uC720\uB294 mod.json\uC5D0)",
+  "; its plugins as they came: {list}": "; \uD50C\uB7EC\uADF8\uC778\uC740 \uB4E4\uC5B4 \uC788\uB358 \uADF8\uB300\uB85C: {list}",
+  "; left out, as unreadable: {list}": "; \uC77D\uC744 \uC218 \uC5C6\uC5B4 \uBE8C: {list}",
   "; {n} rows play it": "; \uC774 \uD30C\uC77C\uC744 \uC7AC\uC0DD\uD558\uB294 \uD589 {n}\uAC1C",
+  ". Not in it: {list}, which no loader runs from inside an MPQ": ". \uB4E4\uC5B4\uAC00\uC9C0 \uC54A\uC740 \uAC83: {list} (MPQ \uC548\uC758 \uD50C\uB7EC\uADF8\uC778\uC740 \uC5B4\uB5A4 \uB85C\uB354\uB3C4 \uC2E4\uD589\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4)",
   "A WAV, or any sound the browser plays; drop one here too": "WAV \uB610\uB294 \uBE0C\uB77C\uC6B0\uC800\uAC00 \uC7AC\uC0DD\uD558\uB294 \uBAA8\uB4E0 \uC18C\uB9AC. \uC5EC\uAE30\uC5D0 \uB193\uC544\uB3C4 \uB429\uB2C8\uB2E4",
   "A number is needed.": "\uC22B\uC790\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.",
   "A number of 0 or more is needed.": "0 \uC774\uC0C1\uC758 \uC22B\uC790\uAC00 \uD544\uC694\uD569\uB2C8\uB2E4.",
@@ -17720,6 +17723,7 @@ var KO = {
   "It replaces all {n} frames of {file}.": "{file}\uC758 \uD504\uB808\uC784 {n}\uAC1C\uB97C \uBAA8\uB450 \uBC14\uAFC9\uB2C8\uB2E4.",
   "It replaces frame {i} of {file}.": "{file}\uC758 \uD504\uB808\uC784 {i|\uC744} \uBC14\uAFC9\uB2C8\uB2E4.",
   "Its picture and animation \u2192": "\uADF8\uB9BC\uACFC \uC560\uB2C8\uBA54\uC774\uC158 \u2192",
+  "Its code went with it: {list}.": "\uBAA8\uB4DC\uC758 \uCF54\uB4DC\uB3C4 \uD568\uAED8 \uB118\uACBC\uC2B5\uB2C8\uB2E4: {list}.",
   "Line {line}: {message}. The script keeps its last text that assembled.": "{line}\uBC88 \uC904: {message}. \uC2A4\uD06C\uB9BD\uD2B8\uB294 \uB9C8\uC9C0\uB9C9\uC73C\uB85C \uC5B4\uC148\uBE14\uB41C \uD14D\uC2A4\uD2B8\uB97C \uC720\uC9C0\uD569\uB2C8\uB2E4.",
   "Loading the code editor\u2026": "\uCF54\uB4DC \uD3B8\uC9D1\uAE30\uB97C \uBD88\uB7EC\uC624\uB294 \uC911\u2026",
   "Look across the tables for what would break in the game": "\uAC8C\uC784\uC5D0\uC11C \uBB38\uC81C\uAC00 \uB420 \uAC83\uC744 \uD45C \uC804\uCCB4\uC5D0\uC11C \uCC3E\uAE30",
@@ -17749,6 +17753,7 @@ var KO = {
   "Orders": "\uBA85\uB839",
   "Overlays": "\uC624\uBC84\uB808\uC774",
   "Packing {n} files\u2026": "\uD30C\uC77C {n}\uAC1C\uB97C \uBB36\uB294 \uC911\u2026",
+  "Packing the program's archive\u2026": "\uD504\uB85C\uADF8\uB7A8\uC758 \uC544\uCE74\uC774\uBE0C\uB97C \uBB36\uB294 \uC911\u2026",
   "Palette": "\uD314\uB808\uD2B8",
   "Pause": "\uC77C\uC2DC \uC815\uC9C0",
   "Pictures": "\uADF8\uB9BC",
@@ -17811,6 +17816,7 @@ var KO = {
   "The mod as a folder of text and pictures (scmjs mod unpack's form), in a zip": "\uBAA8\uB4DC\uB97C \uD14D\uC2A4\uD2B8\uC640 \uADF8\uB9BC \uD3F4\uB354(scmjs mod unpack\uC758 \uD615\uC2DD)\uB85C, zip\uC5D0 \uB2F4\uC544",
   "The mod as an MPQ": "\uBAA8\uB4DC\uB97C MPQ\uB85C",
   "The mod as an MPQ the launchers load": "\uB7F0\uCC98\uAC00 \uC77D\uB294 MPQ\uB85C \uB41C \uBAA8\uB4DC",
+  "The mod as the program it came as: the program and the plugins it carries as they came, its archive as it is now": "\uBAA8\uB4DC\uB97C \uC6D0\uB798\uC758 \uD504\uB85C\uADF8\uB7A8\uC73C\uB85C: \uD504\uB85C\uADF8\uB7A8\uACFC \uADF8 \uC548\uC758 \uD50C\uB7EC\uADF8\uC778\uC740 \uADF8\uB300\uB85C, \uC544\uCE74\uC774\uBE0C\uB294 \uC9C0\uAE08\uC758 \uBAA8\uC2B5\uC73C\uB85C",
   "The mod could not be opened: {error}": "\uBAA8\uB4DC\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: {error}",
   "The mod has no animation or AI scripts.": "\uC774 \uBAA8\uB4DC\uC5D0\uB294 \uC560\uB2C8\uBA54\uC774\uC158 \uC2A4\uD06C\uB9BD\uD2B8\uB098 AI \uC2A4\uD06C\uB9BD\uD2B8\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.",
   "The mod has no overlay files.": "\uC774 \uBAA8\uB4DC\uC5D0\uB294 \uC624\uBC84\uB808\uC774 \uD30C\uC77C\uC774 \uC5C6\uC2B5\uB2C8\uB2E4.",
@@ -17854,6 +17860,7 @@ var KO = {
   "nothing of the game's": "\uAC8C\uC784 \uD30C\uC77C \uC5C6\uC74C",
   "stereo": "\uC2A4\uD14C\uB808\uC624",
   "the game's": "\uAC8C\uC784\uC758 \uAC83",
+  "the program with {n} files in its archive, {size}": "\uC544\uCE74\uC774\uBE0C\uC5D0 \uD30C\uC77C {n}\uAC1C\uB97C \uB2F4\uC740 \uD504\uB85C\uADF8\uB7A8, {size}",
   "the recording": "\uB179\uC74C",
   "the same picture": "\uAC19\uC740 \uADF8\uB9BC",
   "the same sound file": "\uAC19\uC740 \uC18C\uB9AC \uD30C\uC77C",
@@ -18215,13 +18222,17 @@ async function playPageThere(address, own = location.href) {
     return false;
   }
 }
+var pagePath = (path) => {
+  const p = path.replace(/\\/g, "/");
+  return !p.includes("/") || /^(plugins|firegraft)\/[^/]+\.(qdp|bwl|dll|fgp|fgd)$/i.test(p) ? p : p.toLowerCase();
+};
 function playMessage(h2) {
   return {
     type: "scmjs.play",
     dataSet: {
       name: h2.name,
       hash: h2.hash,
-      files: h2.files.map((f) => ({ path: f.name.toLowerCase().replace(/\\/g, "/"), file: new File([f.bytes], f.name.split("\\").pop()) })),
+      files: h2.files.map((f) => ({ path: pagePath(f.path), file: new File([f.bytes], f.path.split(/[\\/]/).pop()) })),
       ...h2.races?.length ? { races: h2.races.map((r2) => ({ ...r2 })) } : {}
     },
     ...h2.map ? { map: h2.map.bytes.slice(), name: h2.map.name } : {}
@@ -18416,6 +18427,20 @@ var Refusal = class {
 };
 var racesApi = (gameData) => gameData;
 
+// archive.ts
+async function writeMpq(members, compression = "zlib") {
+  const creator = new Creator({ sectorSize: 4096, listfile: true, listfileCompress: compression === "pkware" ? "pkware" : "zlib" });
+  for (const m of members) creator.addFile(m.member, m.data, { compress: compression === "none" ? false : compression });
+  return creator.writeAsync();
+}
+function withArchive(program, at, archive) {
+  if (at <= 0 || at > program.length) throw new RangeError(`no archive at ${at} in a program of ${program.length} bytes`);
+  const out = new Uint8Array(at + archive.length);
+  out.set(program.subarray(0, at));
+  out.set(archive, at);
+  return out;
+}
+
 // source.ts
 var OpenError = class extends Error {
 };
@@ -18529,7 +18554,7 @@ function fromDescription(kind, tree, d, archives, identity) {
     if (!hasCodeLine(m)) continue;
     const s = m.source;
     const line = d.identity.plugins[m.name] === m.sha256 ? m.name : void 0;
-    source.plugins.push({ name: s.kind === "file" ? s.path : m.name, bytes: m.size, read: () => moduleBytes(tree, m), layer: s.kind === "file" ? s.path : s.kind === "carried" ? s.exe : s.archive, ...line ? { line } : {} });
+    source.plugins.push({ name: s.kind === "file" ? s.path : m.name, bytes: m.size, read: () => moduleBytes(tree, m), layer: s.kind === "file" ? s.path : s.kind === "carried" ? s.exe : s.archive, ...line ? { line } : {}, ...s.kind === "carried" ? { exe: s.exe } : {} });
   }
   for (const c2 of d.carried) {
     const s = c2.source;
@@ -18548,7 +18573,7 @@ function fromDescription(kind, tree, d, archives, identity) {
   for (const l of d.layers) {
     if (l.kind !== "archive" || l.by !== "firegraft-patcher" && l.by !== "mpqdraft-sempq" && l.by !== "self-executing") continue;
     const carried = d.modules.filter((m) => m.source.kind === "carried" && m.source.exe === l.path);
-    source.exes.push({ file: l.path, kind: l.by === "firegraft-patcher" ? "firegraft" : "sempq", at: l.at ?? 0, plugins: carried.map((m) => ({ id: m.id ?? 0, size: m.size })) });
+    source.exes.push({ file: l.path, kind: l.by === "firegraft-patcher" ? "firegraft" : "sempq", at: l.at ?? 0, plugins: carried.map((m) => ({ id: m.id ?? 0, size: m.size })), read: () => readPath(tree, l.path) });
   }
   source.duplicates = d.duplicates.map((x3) => x3.paths.join(" and "));
   source.left = d.left.map((x3) => x3.path);
@@ -18642,18 +18667,32 @@ async function openTextFolder(root, manifest, pieces, name, base) {
   }
   return source;
 }
-async function handedFiles(source, keys, read, nameOf) {
+async function handedFiles(source, keys, read, nameOf, edited) {
   const out = [];
+  const programs = /* @__PURE__ */ new Map();
+  for (const e of source.exes) if (source.plugins.some((p) => p.exe === e.file && p.line) && ![...programs.keys()].some((f) => leafOf2(f).toLowerCase() === leafOf2(e.file).toLowerCase())) programs.set(e.file, { exe: e, members: [] });
+  const asCame = new Set(edited ? [...programs.keys()].filter((file) => ![...edited].some((k) => source.files.get(k)?.layer === file)) : []);
   for (const k of keys) {
+    if (asCame.has(source.files.get(k)?.layer ?? "")) continue;
     let bytes = null;
     try {
       bytes = await read(k);
     } catch {
     }
-    if (bytes) out.push({ path: gameName(nameOf(k)).replace(/\\/g, "/"), bytes });
+    if (!bytes) continue;
+    const into = programs.get(source.files.get(k)?.layer ?? "");
+    if (into) into.members.push({ member: nameOf(k), data: bytes });
+    else out.push({ path: gameName(nameOf(k)).replace(/\\/g, "/"), bytes });
   }
-  for (const p of source.plugins) if (p.line) out.push({ path: `plugins/${p.line}`, bytes: await p.read() });
-  for (const p of source.firegraft) if (/\.(fgp|fgd)$/i.test(p.name)) out.push({ path: `firegraft/${leafOf2(p.name)}`, bytes: await p.read() });
+  for (const p of source.plugins) if (p.line && !(p.exe && programs.has(p.exe))) out.push({ path: `plugins/${p.line}`, bytes: await p.read() });
+  for (const p of source.firegraft) {
+    if (!/\.(fgp|fgd)$/i.test(p.name)) continue;
+    if (p.member && asCame.has(p.layer)) continue;
+    const into = p.member ? programs.get(p.layer) : void 0;
+    if (into) into.members.push({ member: p.member, data: await p.read() });
+    else out.push({ path: `firegraft/${leafOf2(p.name)}`, bytes: await p.read() });
+  }
+  for (const { exe, members } of programs.values()) out.push({ path: leafOf2(exe.file), bytes: asCame.has(exe.file) ? await exe.read() : withArchive(await exe.read(), exe.at, await writeMpq(members, "none")) });
   return out;
 }
 async function identityOf2(source) {
@@ -18667,19 +18706,29 @@ function looksLikeMod(paths) {
 }
 
 // save.ts
-async function currentMembers(session) {
+async function currentMembers(session, left = []) {
   const out = [];
   for (const k of session.members()) {
-    const data = await session.read(k);
+    let data = null;
+    try {
+      data = await session.read(k);
+    } catch {
+      left.push(session.nameOf(k));
+    }
     if (data) out.push({ member: session.nameOf(k), data });
   }
   for (const p of [...session.source.plugins, ...session.source.firegraft]) if (p.member) out.push({ member: p.member, data: await p.read() });
   return out.sort((a2, b) => gameName(a2.member) < gameName(b.member) ? -1 : 1);
 }
-async function writeMpq(members, compression = "zlib") {
-  const creator = new Creator({ sectorSize: 4096, listfile: true, listfileCompress: compression === "pkware" ? "pkware" : "zlib" });
-  for (const m of members) creator.addFile(m.member, m.data, { compress: compression === "none" ? false : compression });
-  return creator.writeAsync();
+async function writeProgram(session, left = []) {
+  const s = session.source;
+  const exe = s.kind === "exe" && s.exes.length === 1 ? s.exes[0] : null;
+  if (!exe) return null;
+  const members = await currentMembers(session, left);
+  return { bytes: withArchive(await exe.read(), exe.at, await writeMpq(members)), members: members.length };
+}
+function codeOutsideMpq(session) {
+  return session.source.plugins.filter((p) => p.line).map((p) => p.line);
 }
 async function textFolder(session, progress, races = session.source.races) {
   const manifest = emptyManifest(session.source.name);
@@ -21090,7 +21139,10 @@ var ModSession = class _ModSession {
       grafts
     });
   }
-  /** The members that differ from the game's own (all of them where no copy of the game can say), by key. */
+  /**
+   * The members that differ from the game's own (all of them where no copy of the game can say), by key. A member its
+   * archive lists and does not give counts as differing: whoever reads it next leaves it out, as the reader does.
+   */
   async changedMembers() {
     const out = [];
     for (const k of this.members()) {
@@ -21098,7 +21150,12 @@ var ModSession = class _ModSession {
       if (same2 === void 0) {
         const has = this.baseHas ? await this.baseHas(k) : null;
         const theirs = has === false || !this.base ? null : await this.base(k);
-        const mine = theirs ? await this.read(k) : null;
+        let mine = null;
+        try {
+          mine = theirs ? await this.read(k) : null;
+        } catch {
+          mine = null;
+        }
         same2 = !!theirs && !!mine && equal(theirs, mine);
         this.baseSame.set(k, same2);
       }
@@ -21106,11 +21163,15 @@ var ModSession = class _ModSession {
     }
     return out;
   }
-  /** Those members with their bytes: what the play page is handed. */
+  /** Those members with their bytes (one that cannot be read left out, as the reader leaves it). The play page is handed them with the mod's code: `engine.ts`'s `playFiles`. */
   async changedFiles() {
     const out = [];
     for (const k of await this.changedMembers()) {
-      const bytes = await this.read(k);
+      let bytes = null;
+      try {
+        bytes = await this.read(k);
+      } catch {
+      }
       if (bytes) out.push({ name: this.nameOf(k), bytes });
     }
     return out;
@@ -22083,7 +22144,13 @@ var LiveSender = class {
 // engine.ts
 var ENGINE_SERVICE = "scm-sim.engine";
 async function engineFiles(s) {
-  return handedFiles(s.source, s.members().filter((k) => s.has(k)), (k) => s.read(k), (k) => s.nameOf(k));
+  return handedFiles(s.source, s.members().filter((k) => s.has(k)), (k) => s.read(k), (k) => s.nameOf(k), new Set(await s.edited()));
+}
+async function playFiles(s) {
+  return handedFiles(s.source, await s.changedMembers(), (k) => s.read(k), (k) => s.nameOf(k), new Set(await s.edited()));
+}
+function handedCode(files) {
+  return files.filter((f) => /^plugins\/[^/]+\.(qdp|bwl|dll)$/i.test(f.path) || /^[^/]+\.exe$/i.test(f.path)).map((f) => f.path.replace(/^plugins\//, ""));
 }
 var EngineRegistration = class {
   engine = null;
@@ -23103,6 +23170,7 @@ var ModEditor = class {
   /* ── Save, export ── */
   saveTitle() {
     const kind = this.session?.source.kind;
+    if (kind === "exe" && this.session.source.exes.length === 1) return t("The mod as the program it came as: the program and the plugins it carries as they came, its archive as it is now");
     return kind === "mod folder" ? t("The folder of text and pictures, in a zip") : kind === "folder" ? t("The files you changed, in their folders, in a zip: copy them over the mod's folder") : t("The mod as an MPQ");
   }
   async save(how) {
@@ -23110,16 +23178,26 @@ var ModEditor = class {
     if (!s) return;
     const errors = s.scriptErrors();
     if (errors.length && !await this.api.ui.confirm(t("{n, plural, one {{count} script does not assemble} other {{count} scripts do not assemble}} ({first}); the last text that did is what is saved. Save anyway?", { n: errors.length, count: num2(errors.length), first: t("{file}, line {line}", { file: errors[0].doc.label, line: errors[0].error.line }) }))) return;
-    const form = how === "same" ? s.source.kind === "mod folder" ? "folder" : s.source.kind === "folder" ? "changes" : "mpq" : how;
+    const form = how === "same" ? s.source.kind === "mod folder" ? "folder" : s.source.kind === "folder" ? "changes" : s.source.kind === "exe" && s.source.exes.length === 1 ? "exe" : "mpq" : how;
     const progress = this.api.ui.progress(t("Writing {name}\u2026", { name: s.source.name }));
     try {
       let bytes, fileName, what;
-      if (form === "mpq") {
-        const members = await currentMembers(s);
+      const left = [];
+      const leftWords = () => left.length ? t("; left out, as unreadable: {list}", { list: left.slice(0, 3).join(", ") + (left.length > 3 ? " \u2026" : "") }) : "";
+      if (form === "exe") {
+        progress.report(0.3, t("Packing the program's archive\u2026"));
+        const program = await writeProgram(s, left);
+        bytes = program.bytes;
+        fileName = `${s.source.name}.exe`;
+        const code = s.source.plugins.filter((p) => p.exe).map((p) => p.line ?? p.name);
+        what = t("the program with {n} files in its archive, {size}", { n: num2(program.members), size: sizeText(bytes.length) }) + (code.length ? t("; its plugins as they came: {list}", { list: code.join(", ") }) : "") + leftWords();
+      } else if (form === "mpq") {
+        const members = await currentMembers(s, left);
         progress.report(0.3, t("Packing {n} files\u2026", { n: num2(members.length) }));
         bytes = await writeMpq(members);
         fileName = `${s.source.name}.mpq`;
-        what = t("{n} files in an MPQ, {size}", { n: num2(members.length), size: sizeText(bytes.length) });
+        const outside = codeOutsideMpq(s);
+        what = t("{n} files in an MPQ, {size}", { n: num2(members.length), size: sizeText(bytes.length) }) + leftWords() + (outside.length ? t(". Not in it: {list}, which no loader runs from inside an MPQ", { list: outside.join(", ") }) : "");
       } else if (form === "folder") {
         const { files, manifest } = await textFolder(s, (done, total) => progress.report(done / total * 0.9, t("{done} of {total} files\u2026", { done: num2(done), total: num2(total) })), this.races?.rows ?? s.source.races);
         bytes = writeZip(files, s.source.name);
@@ -23242,7 +23320,7 @@ var ModEditor = class {
     if (!s || !svc) return;
     this.say(t("Handing {name} to the play page\u2026", { name: s.source.name }));
     const test = (async () => {
-      const files = await s.changedFiles();
+      const files = await playFiles(s);
       if (!files.length) throw new Error(t("{name} changes nothing of the game here: every file is the game's own.", { name: s.source.name }));
       const hash = await s.hash();
       let map = null, blank = false;
@@ -23255,7 +23333,7 @@ var ModEditor = class {
         blank = true;
       }
       const races = this.races?.rows ?? [];
-      return { map, mod: { name: s.source.name, hash, files: files.map((f) => ({ path: livePath(f.name), bytes: f.bytes })), ...races.length ? { races: races.map((r2) => ({ ...r2 })) } : {} }, ...blank ? { useMapSettings: true } : {} };
+      return { map, mod: { name: s.source.name, hash, files, ...races.length ? { races: races.map((r2) => ({ ...r2 })) } : {} }, ...blank ? { useMapSettings: true } : {} };
     })();
     svc.play(test).then(
       (outcome) => this.say(outcome === "started" ? t("The test game is running with {name}: each edit goes into it.", { name: s.source.name }) : t("The play page has {name}; choose a map there.", { name: s.source.name })),
@@ -23279,7 +23357,7 @@ var ModEditor = class {
         return;
       }
       this.say(t("Handing {name} to the play page\u2026", { name: s.source.name }));
-      const files = await s.changedFiles();
+      const files = await playFiles(s);
       if (!files.length) {
         this.say(t("{name} changes nothing of the game here: every file is the game's own.", { name: s.source.name }));
         return;
@@ -23292,7 +23370,8 @@ var ModEditor = class {
       }
       try {
         const outcome = await this.playTab.play(playMessage({ name: s.source.name, hash, files, map, races: this.races?.rows ?? [] }));
-        this.say(outcome === "started" ? t("Playing {map} with {name} ({n} files, {hash}).", { map: map?.name ?? "", name: s.source.name, n: num2(files.length), hash }) : t("The play page has {name} ({n} files, {hash}); choose a map there.", { name: s.source.name, n: num2(files.length), hash }));
+        const code = handedCode(files);
+        this.say((outcome === "started" ? t("Playing {map} with {name} ({n} files, {hash}).", { map: map?.name ?? "", name: s.source.name, n: num2(files.length), hash }) : t("The play page has {name} ({n} files, {hash}); choose a map there.", { name: s.source.name, n: num2(files.length), hash })) + (code.length ? ` ${t("Its code went with it: {list}.", { list: code.join(", ") })}` : ""));
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         this.say(why === "timeout" ? t("The play page did not answer. Is it open in another tab?") : t("The play page said: {message}", { message: why }));
