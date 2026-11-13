@@ -23,7 +23,7 @@ import { MOD_KO } from "./modKo";
 import { DEFAULT_DIST, DIST_STORAGE_KEY } from "./monaco";
 import { PlayTab, playAddress, playMessage, playPageThere } from "./play";
 import { attachReader } from "./reader";
-import { changedZip, currentMembers, textFolder, writeMpq, writeZip } from "./save";
+import { changedZip, codeOutsideMpq, currentMembers, textFolder, writeMpq, writeProgram, writeZip } from "./save";
 import { Look } from "./look";
 import { PicturesView } from "./picturesView";
 import { RaceTable, racesApi, type DataSetRace } from "./races";
@@ -34,8 +34,8 @@ import { ModSession } from "./session";
 import { HASH_LATER, OpenError, looksLikeMod, openPieces, type Piece } from "./source";
 import { StringsView } from "./stringsView";
 import { GraftsView } from "./graftsView";
-import { LIVE_SERVICE, LiveSender, livePath, type LiveService } from "./live";
-import { ENGINE_SERVICE, EngineRegistration, type EngineService } from "./engine";
+import { LIVE_SERVICE, LiveSender, type LiveService } from "./live";
+import { ENGINE_SERVICE, EngineRegistration, handedCode, playFiles, type EngineService } from "./engine";
 import { TablesView, type ViewContext } from "./tablesView";
 
 export default function activate(api: PluginApi) {
@@ -501,6 +501,7 @@ class ModEditor {
 
   private saveTitle(): string {
     const kind = this.session?.source.kind;
+    if (kind === "exe" && this.session!.source.exes.length === 1) return t("The mod as the program it came as: the program and the plugins it carries as they came, its archive as it is now");
     return kind === "mod folder" ? t("The folder of text and pictures, in a zip") : kind === "folder" ? t("The files you changed, in their folders, in a zip: copy them over the mod's folder") : t("The mod as an MPQ");
   }
 
@@ -509,16 +510,28 @@ class ModEditor {
     if (!s) return;
     const errors = s.scriptErrors();
     if (errors.length && !(await this.api.ui.confirm(t("{n, plural, one {{count} script does not assemble} other {{count} scripts do not assemble}} ({first}); the last text that did is what is saved. Save anyway?", { n: errors.length, count: num(errors.length), first: t("{file}, line {line}", { file: errors[0].doc.label, line: errors[0].error.line }) })))) return;
-    const form = how === "same" ? (s.source.kind === "mod folder" ? "folder" : s.source.kind === "folder" ? "changes" : "mpq") : how;
+    // (a mod that came as one program is saved as that program again: an MPQ holds none of the plugins it carries)
+    const form = how === "same" ? (s.source.kind === "mod folder" ? "folder" : s.source.kind === "folder" ? "changes" : s.source.kind === "exe" && s.source.exes.length === 1 ? "exe" : "mpq") : how;
     const progress = this.api.ui.progress(t("Writing {name}…", { name: s.source.name }));
     try {
       let bytes: Uint8Array, fileName: string, what: string;
-      if (form === "mpq") {
-        const members = await currentMembers(s);
+      // (members its archive lists and does not give: left out, as the reader leaves them out of the mod)
+      const left: string[] = [];
+      const leftWords = () => (left.length ? t("; left out, as unreadable: {list}", { list: left.slice(0, 3).join(", ") + (left.length > 3 ? " …" : "") }) : "");
+      if (form === "exe") {
+        progress.report(0.3, t("Packing the program's archive…"));
+        const program = (await writeProgram(s, left))!;
+        bytes = program.bytes;
+        fileName = `${s.source.name}.exe`;
+        const code = s.source.plugins.filter((p) => p.exe).map((p) => p.line ?? p.name);
+        what = t("the program with {n} files in its archive, {size}", { n: num(program.members), size: sizeText(bytes.length) }) + (code.length ? t("; its plugins as they came: {list}", { list: code.join(", ") }) : "") + leftWords();
+      } else if (form === "mpq") {
+        const members = await currentMembers(s, left);
         progress.report(0.3, t("Packing {n} files…", { n: num(members.length) }));
         bytes = await writeMpq(members);
         fileName = `${s.source.name}.mpq`;
-        what = t("{n} files in an MPQ, {size}", { n: num(members.length), size: sizeText(bytes.length) });
+        const outside = codeOutsideMpq(s);
+        what = t("{n} files in an MPQ, {size}", { n: num(members.length), size: sizeText(bytes.length) }) + leftWords() + (outside.length ? t(". Not in it: {list}, which no loader runs from inside an MPQ", { list: outside.join(", ") }) : "");
       } else if (form === "folder") {
         const { files, manifest } = await textFolder(s, (done, total) => progress.report(done / total * 0.9, t("{done} of {total} files…", { done: num(done), total: num(total) })), this.races?.rows ?? s.source.races);
         bytes = writeZip(files, s.source.name);
@@ -624,7 +637,8 @@ class ModEditor {
     this.say(t("Handing {name} to the play page…", { name: s.source.name }));
     // The tab is opened from the click itself: the service opens it before anything is awaited.
     const test = (async () => {
-      const files = await s.changedFiles();
+      // (the files that differ from the game's, and all of the mod's code: without it, another game)
+      const files = await playFiles(s);
       if (!files.length) throw new Error(t("{name} changes nothing of the game here: every file is the game's own.", { name: s.source.name }));
       const hash = await s.hash();
       let map: { bytes: Uint8Array; name: string } | null = null, blank = false;
@@ -639,7 +653,7 @@ class ModEditor {
         blank = true;
       }
       const races = this.races?.rows ?? [];
-      return { map, mod: { name: s.source.name, hash, files: files.map((f) => ({ path: livePath(f.name), bytes: f.bytes })), ...(races.length ? { races: races.map((r) => ({ ...r })) } : {}) }, ...(blank ? { useMapSettings: true } : {}) };
+      return { map, mod: { name: s.source.name, hash, files, ...(races.length ? { races: races.map((r) => ({ ...r })) } : {}) }, ...(blank ? { useMapSettings: true } : {}) };
     })();
     svc.play(test).then(
       (outcome) => this.say(outcome === "started" ? t("The test game is running with {name}: each edit goes into it.", { name: s.source.name }) : t("The play page has {name}; choose a map there.", { name: s.source.name })),
@@ -660,7 +674,8 @@ class ModEditor {
       if (!there) { this.say(t("There is no play page at {address}: it is served beside the editor on scmjs.dev, not by a development server of the editor alone.", { address })); return; }
       if (!this.playTab!.openTab()) { this.say(t("The browser did not open the play page's tab. Allow pop-ups for this page and press Play again.")); return; }
       this.say(t("Handing {name} to the play page…", { name: s.source.name }));
-      const files = await s.changedFiles();
+      // (the files that differ from the game's, and all of the mod's code: without it, another game)
+      const files = await playFiles(s);
       if (!files.length) { this.say(t("{name} changes nothing of the game here: every file is the game's own.", { name: s.source.name })); return; }
       const hash = await s.hash();
       let map: { bytes: Uint8Array; name: string } | null = null;
@@ -670,9 +685,11 @@ class ModEditor {
       }
       try {
         const outcome = await this.playTab!.play(playMessage({ name: s.source.name, hash, files, map, races: this.races?.rows ?? [] }));
-        this.say(outcome === "started"
+        const code = handedCode(files);
+        this.say((outcome === "started"
           ? t("Playing {map} with {name} ({n} files, {hash}).", { map: map?.name ?? "", name: s.source.name, n: num(files.length), hash })
-          : t("The play page has {name} ({n} files, {hash}); choose a map there.", { name: s.source.name, n: num(files.length), hash }));
+          : t("The play page has {name} ({n} files, {hash}); choose a map there.", { name: s.source.name, n: num(files.length), hash }))
+          + (code.length ? ` ${t("Its code went with it: {list}.", { list: code.join(", ") })}` : ""));
       } catch (e) {
         const why = e instanceof Error ? e.message : String(e);
         this.say(why === "timeout" ? t("The play page did not answer. Is it open in another tab?") : t("The play page said: {message}", { message: why }));

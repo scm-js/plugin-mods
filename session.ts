@@ -502,7 +502,10 @@ export class ModSession {
     });
   }
 
-  /** The members that differ from the game's own (all of them where no copy of the game can say), by key. */
+  /**
+   * The members that differ from the game's own (all of them where no copy of the game can say), by key. A member its
+   * archive lists and does not give counts as differing: whoever reads it next leaves it out, as the reader does.
+   */
   async changedMembers(): Promise<string[]> {
     const out: string[] = [];
     for (const k of this.members()) {
@@ -510,7 +513,8 @@ export class ModSession {
       if (same === undefined) {
         const has = this.baseHas ? await this.baseHas(k) : null;
         const theirs = has === false || !this.base ? null : await this.base(k);
-        const mine = theirs ? await this.read(k) : null;
+        let mine: Uint8Array | null = null;
+        try { mine = theirs ? await this.read(k) : null; } catch { mine = null; }
         same = !!theirs && !!mine && equal(theirs, mine);
         this.baseSame.set(k, same);
       }
@@ -519,10 +523,14 @@ export class ModSession {
     return out;
   }
 
-  /** Those members with their bytes: what the play page is handed. */
+  /** Those members with their bytes (one that cannot be read left out, as the reader leaves it). The play page is handed them with the mod's code: `engine.ts`'s `playFiles`. */
   async changedFiles(): Promise<{ name: string; bytes: Uint8Array }[]> {
     const out: { name: string; bytes: Uint8Array }[] = [];
-    for (const k of await this.changedMembers()) { const bytes = await this.read(k); if (bytes) out.push({ name: this.nameOf(k), bytes }); }
+    for (const k of await this.changedMembers()) {
+      let bytes: Uint8Array | null = null;
+      try { bytes = await this.read(k); } catch { /* left out */ }
+      if (bytes) out.push({ name: this.nameOf(k), bytes });
+    }
     return out;
   }
 

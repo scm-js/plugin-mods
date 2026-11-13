@@ -6,10 +6,12 @@
  *   → `{ type: "scmjs.play", dataSet: { name, hash, files: [{ path, file }], races? }, map?, name? }`
  *   ← `{ type: "scmjs.play.started" }` / `{ type: "scmjs.play.shown" }` / `{ type: "scmjs.play.error", message }`
  *
- * `files` are the mod's files that differ from the game's (`path` the game's path in lower case with forward slashes,
- * `file` a `File`); `hash` is the shared rule over them. The page keeps them as if they were dropped on it, loads again
- * with the mod and says ready again, and is handed the same message; with a map it plays it, without one it shows its
- * Mods dialog. Nothing leaves the person's browser.
+ * `files` are the mod's files that differ from the game's and all of its code (`engine.ts`'s `playFiles`: `path` the
+ * game's path in lower case with forward slashes, a module under `plugins/` or `firegraft/`, a program that carries
+ * plugins at the top by its own name; `file` a `File`); `hash` is what the mod goes by in the editor. The page keeps them
+ * as if they were dropped on it, loads again with the mod (at the address that runs its code) and says ready again, and
+ * is handed the same message; with a map it plays it, without one it shows its Mods dialog. Nothing leaves the person's
+ * browser.
  */
 
 import type { DataSetRace } from "./races";
@@ -17,7 +19,8 @@ import type { DataSetRace } from "./races";
 export interface PlayHandoff {
   name: string;
   hash: string;
-  files: { name: string; bytes: Uint8Array }[];
+  /** By the page's path (`playFiles`). */
+  files: { path: string; bytes: Uint8Array }[];
   map?: { bytes: Uint8Array; name: string } | null;
   /** The races the mod adds (the Races tab's rows), handed with its data set; none: left out. */
   races?: readonly DataSetRace[];
@@ -49,13 +52,23 @@ export async function playPageThere(address: string, own: string = location.href
   }
 }
 
+/**
+ * A file's path as the page is handed it: forward slashes; a game file's in lower case (the game's paths). The mod's code
+ * keeps its own names — a module under `plugins/` or `firegraft/`, a program at the top that carries plugins — as a
+ * dropped folder gives them: the page names the modules, and the mod after its program, by them.
+ */
+export const pagePath = (path: string): string => {
+  const p = path.replace(/\\/g, "/");
+  return !p.includes("/") || /^(plugins|firegraft)\/[^/]+\.(qdp|bwl|dll|fgp|fgd)$/i.test(p) ? p : p.toLowerCase();
+};
+
 /** The message the play page is handed (files as `File`s by the game's path). */
 export function playMessage(h: PlayHandoff): Record<string, unknown> {
   return {
     type: "scmjs.play",
     dataSet: {
       name: h.name, hash: h.hash,
-      files: h.files.map((f) => ({ path: f.name.toLowerCase().replace(/\\/g, "/"), file: new File([f.bytes as Uint8Array<ArrayBuffer>], f.name.split("\\").pop()!) })),
+      files: h.files.map((f) => ({ path: pagePath(f.path), file: new File([f.bytes as Uint8Array<ArrayBuffer>], f.path.split(/[\\/]/).pop()!) })),
       ...(h.races?.length ? { races: h.races.map((r) => ({ ...r })) } : {}),
     },
     ...(h.map ? { map: h.map.bytes.slice(), name: h.map.name } : {}),

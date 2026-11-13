@@ -4,7 +4,6 @@
  * packs back to the same bytes) as a zip, and the changed files alone as a zip for a mod that is a folder of loose
  * files. Pure apart from the archive library; the panel hands the bytes to `api.ui.saveFile`.
  */
-import { Creator } from "mopaq";
 import {
   DEFAULT_PALETTE, MOD_FOLDERS, MOD_MANIFEST, datTableOf, emptyManifest, folderPath, gameName, recordRendered, renderAiScripts, renderMember, tidyManifest,
   type DatTableName, type ModManifest, type Rendered,
@@ -12,25 +11,44 @@ import {
 import { normalizeRaces, type DataSetRace } from "./races";
 import type { ModSession } from "./session";
 import { gameCopies } from "./source";
+import { withArchive, writeMpq } from "./archive";
 
-export type Compression = "zlib" | "pkware" | "none";
+export { writeMpq, type Compression } from "./archive";
 
-/** Every member the mod has now, with its current bytes, in name order; plugins carried inside the archive too. */
-export async function currentMembers(session: ModSession): Promise<{ member: string; data: Uint8Array }[]> {
+/**
+ * Every member the mod has now, with its current bytes, in name order; plugins carried inside the archive too. A member
+ * its archive lists and does not give (`left`, by name) is left out, as the reader leaves it out of the mod.
+ */
+export async function currentMembers(session: ModSession, left: string[] = []): Promise<{ member: string; data: Uint8Array }[]> {
   const out: { member: string; data: Uint8Array }[] = [];
   for (const k of session.members()) {
-    const data = await session.read(k);
+    let data: Uint8Array | null = null;
+    try { data = await session.read(k); } catch { left.push(session.nameOf(k)); }
     if (data) out.push({ member: session.nameOf(k), data });
   }
   for (const p of [...session.source.plugins, ...session.source.firegraft]) if (p.member) out.push({ member: p.member, data: await p.read() });
   return out.sort((a, b) => (gameName(a.member) < gameName(b.member) ? -1 : 1));
 }
 
-/** The members as an MPQ. */
-export async function writeMpq(members: readonly { member: string; data: Uint8Array }[], compression: Compression = "zlib"): Promise<Uint8Array> {
-  const creator = new Creator({ sectorSize: 4096, listfile: true, listfileCompress: compression === "pkware" ? "pkware" : "zlib" });
-  for (const m of members) creator.addFile(m.member, m.data, { compress: compression === "none" ? false : compression });
-  return creator.writeAsync();
+/**
+ * The program a mod came as (one self-executing exe: FireGraft's patcher, MPQDraft's self-executing MPQ), with an archive
+ * of its members as they are now where its own was (`withArchive`): the program and the plugins it carries, in its
+ * loader's order, as they came. Null for a mod that did not come as one program.
+ */
+export async function writeProgram(session: ModSession, left: string[] = []): Promise<{ bytes: Uint8Array; members: number } | null> {
+  const s = session.source;
+  const exe = s.kind === "exe" && s.exes.length === 1 ? s.exes[0] : null;
+  if (!exe) return null;
+  const members = await currentMembers(session, left);
+  return { bytes: withArchive(await exe.read(), exe.at, await writeMpq(members)), members: members.length };
+}
+
+/**
+ * The modules of the mod's code an MPQ does not carry, by name: the plugins and libraries a loader loads from files or
+ * from a patcher exe (an MPQ holds none that is run: a plugin among its members is loaded by no loader).
+ */
+export function codeOutsideMpq(session: ModSession): string[] {
+  return session.source.plugins.filter((p) => p.line).map((p) => p.line!);
 }
 
 /* ── The text folder ───────────────────────────────────────────────────── */

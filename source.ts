@@ -13,10 +13,11 @@
  */
 import {
   ModError, firegraftBytes, fileReaders, gameCopyFolders, gameName as lineName, hasCodeLine, isSystemFile, isZip, leafOf, modIdentity, moduleBytes, normalizeRaces, openLayer,
-  readMod, readZip,
+  readMod, readPath, readZip,
   type DataSetRace, type Identity, type Layer, type ModDescription, type ModFiles, type ModMessage, type OpenArchives, type UnhashedDescription,
 } from "@scm-js/mod";
 import { t, modWords } from "./i18n";
+import { withArchive, writeMpq } from "./archive";
 import {
   DAT_SCHEMAS, DAT_TABLES, MOD_MANIFEST, decodeTblFile, gameName, memberOf, namesOf, packFile, readManifest,
   decodeDat, datTableOf, type DatTableName, type ModData, type ModManifest, type ModNames,
@@ -45,9 +46,16 @@ export interface ModFile {
  * A plugin, library or FireGraft file the mod carries: kept, never run. `member` when it was inside the mod's archive
  * (a plugin there is loaded by no loader and has no line in the mod's hash). `line`: the name its line in the hash goes
  * by (`Identity.plugins`), for a module of the mod's code that has one. `bytes`: its size (0 for a plugin inside the
- * archive, whose size the reader does not give).
+ * archive, whose size the reader does not give). `exe`: the program that carries it, for a plugin a patcher exe carries
+ * in itself (one of `ModSource.exes`): it goes wherever the mod goes inside that program, which keeps its loader's order.
  */
-export interface Carried { name: string; bytes: number; read(): Promise<Uint8Array>; member?: string; layer: string; line?: string }
+export interface Carried { name: string; bytes: number; read(): Promise<Uint8Array>; member?: string; layer: string; line?: string; exe?: string }
+
+/**
+ * A program the mod came in (a self-executing exe: FireGraft's patcher, MPQDraft's self-executing MPQ, another program
+ * with the mod's archive after it): its path, its form, where its archive is (`at`), what it carries, and its bytes.
+ */
+export interface Program { file: string; kind: "sempq" | "firegraft"; at: number; plugins: { id: number; size: number }[]; read(): Promise<Uint8Array> }
 
 export type SourceKind = "mod folder" | "folder" | "archive" | "exe" | "zip";
 
@@ -64,7 +72,7 @@ export interface ModSource {
    */
   plugins: Carried[];
   firegraft: Carried[];
-  exes: { file: string; kind: "sempq" | "firegraft"; at: number; plugins: { id: number; size: number }[] }[];
+  exes: Program[];
   /** Two files of a folder for one game path (any case): the later is used. */
   duplicates: string[];
   /** Files that are not the mod's (a read-me beside the game's folders, an operating system's `desktop.ini`), left out. */
@@ -215,7 +223,7 @@ function fromDescription(kind: SourceKind, tree: ModFiles, d: ModDescription | U
     if (!hasCodeLine(m)) continue;
     const s = m.source;
     const line = d.identity.plugins[m.name] === m.sha256 ? m.name : undefined;
-    source.plugins.push({ name: s.kind === "file" ? s.path : m.name, bytes: m.size, read: () => moduleBytes(tree, m), layer: s.kind === "file" ? s.path : s.kind === "carried" ? s.exe : s.archive, ...(line ? { line } : {}) });
+    source.plugins.push({ name: s.kind === "file" ? s.path : m.name, bytes: m.size, read: () => moduleBytes(tree, m), layer: s.kind === "file" ? s.path : s.kind === "carried" ? s.exe : s.archive, ...(line ? { line } : {}), ...(s.kind === "carried" ? { exe: s.exe } : {}) });
   }
   for (const c of d.carried) {
     const s = c.source;
@@ -235,7 +243,7 @@ function fromDescription(kind: SourceKind, tree: ModFiles, d: ModDescription | U
   for (const l of d.layers) {
     if (l.kind !== "archive" || (l.by !== "firegraft-patcher" && l.by !== "mpqdraft-sempq" && l.by !== "self-executing")) continue;
     const carried = d.modules.filter((m) => m.source.kind === "carried" && m.source.exe === l.path);
-    source.exes.push({ file: l.path, kind: l.by === "firegraft-patcher" ? "firegraft" : "sempq", at: l.at ?? 0, plugins: carried.map((m) => ({ id: m.id ?? 0, size: m.size })) });
+    source.exes.push({ file: l.path, kind: l.by === "firegraft-patcher" ? "firegraft" : "sempq", at: l.at ?? 0, plugins: carried.map((m) => ({ id: m.id ?? 0, size: m.size })), read: () => readPath(tree, l.path) });
   }
   source.duplicates = d.duplicates.map((x) => x.paths.join(" and "));
   source.left = d.left.map((x) => x.path);
@@ -337,17 +345,41 @@ async function openTextFolder(root: string, manifest: ModManifest, pieces: Piece
  * game path (`arr/units.dat`), each module of its code that has a line in the hash under `plugins/` by the name the line
  * goes by, and its FireGraft files under `firegraft/`. A plugin inside the mod's archive is not handed: no loader loads
  * it, and it has no line. `read` gives a file as it is now (an edit's bytes); one that cannot be read is left out.
+ *
+ * A program that carries plugins of the mod's (a patcher exe's own) is handed as that program, at the top, by its own
+ * name. Its plugins are then read by the page as the patcher's, in its loader's order and each as the plugin it is;
+ * given as files under `plugins/`, they would be a folder's, sorted by name, and one that names itself `x.dll` a library
+ * that is never run. Where none of the files it held was edited (`edited`, by key) it is handed as it came; else its
+ * program and what it carries as they came, with an archive of the files given here that it held, as they are now, where
+ * its archive was (`withArchive`), its FireGraft project and database among them where they were.
  */
-export async function handedFiles(source: ModSource, keys: readonly string[], read: (key: string) => Promise<Uint8Array | null>, nameOf: (key: string) => string): Promise<{ path: string; bytes: Uint8Array }[]> {
+export async function handedFiles(source: ModSource, keys: readonly string[], read: (key: string) => Promise<Uint8Array | null>, nameOf: (key: string) => string, edited?: ReadonlySet<string>): Promise<{ path: string; bytes: Uint8Array }[]> {
   const out: { path: string; bytes: Uint8Array }[] = [];
+  // (each program that carries a plugin with a line, and the members it gets back)
+  const programs = new Map<string, { exe: Program; members: { member: string; data: Uint8Array }[] }>();
+  for (const e of source.exes) if (source.plugins.some((p) => p.exe === e.file && p.line) && ![...programs.keys()].some((f) => leafOf(f).toLowerCase() === leafOf(e.file).toLowerCase())) programs.set(e.file, { exe: e, members: [] });
+  // (a program none of whose files was edited: as it came, its files and project inside it)
+  const asCame = new Set(edited ? [...programs.keys()].filter((file) => ![...edited].some((k) => source.files.get(k)?.layer === file)) : []);
   for (const k of keys) {
+    if (asCame.has(source.files.get(k)?.layer ?? "")) continue;
     let bytes: Uint8Array | null = null;
     // (a member its archive lists and does not hold: left out, as the reader leaves it)
     try { bytes = await read(k); } catch { /* left out */ }
-    if (bytes) out.push({ path: gameName(nameOf(k)).replace(/\\/g, "/"), bytes });
+    if (!bytes) continue;
+    const into = programs.get(source.files.get(k)?.layer ?? "");
+    if (into) into.members.push({ member: nameOf(k), data: bytes });
+    else out.push({ path: gameName(nameOf(k)).replace(/\\/g, "/"), bytes });
   }
-  for (const p of source.plugins) if (p.line) out.push({ path: `plugins/${p.line}`, bytes: await p.read() });
-  for (const p of source.firegraft) if (/\.(fgp|fgd)$/i.test(p.name)) out.push({ path: `firegraft/${leafOf(p.name)}`, bytes: await p.read() });
+  for (const p of source.plugins) if (p.line && !(p.exe && programs.has(p.exe))) out.push({ path: `plugins/${p.line}`, bytes: await p.read() });
+  for (const p of source.firegraft) {
+    if (!/\.(fgp|fgd)$/i.test(p.name)) continue;
+    if (p.member && asCame.has(p.layer)) continue;
+    const into = p.member ? programs.get(p.layer) : undefined;
+    if (into) into.members.push({ member: p.member!, data: await p.read() });
+    else out.push({ path: `firegraft/${leafOf(p.name)}`, bytes: await p.read() });
+  }
+  // (stored: the page reads it once and keeps what it needs)
+  for (const { exe, members } of programs.values()) out.push({ path: leafOf(exe.file), bytes: asCame.has(exe.file) ? await exe.read() : withArchive(await exe.read(), exe.at, await writeMpq(members, "none")) });
   return out;
 }
 
