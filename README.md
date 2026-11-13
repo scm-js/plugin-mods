@@ -94,32 +94,38 @@ edit back and the hash is the one it opened with. Files an operating system leav
 `Thumbs.db`, `.DS_Store` and the like) are not the mod's: they are left out of its files, its counts and its hash, so a
 mod has the same hash whether its folder was picked, dropped or read by `scmjs`.
 
-**Save** writes the mod in the form it came: an MPQ for an `.mpq`, `.exe` or `.zip`; the folder of text for a folder
+**Save** writes the mod in the form it came: an MPQ for an `.mpq` or `.zip`; for a mod's `.exe` (FireGraft's patcher,
+MPQDraft's self-executing MPQ) the `.exe` again, its program and the plugins it carries as they came, in its loader's
+order, with its archive as it is now; the folder of text for a folder
 `scmjs mod unpack` wrote (as a zip); for a folder of loose files, the files you changed in their folders (as a zip, to
 copy over it). **Save as Folder** writes the folder of text and pictures `scmjs mod unpack` lays out, as a zip, each
 text kept only where it packs back to the same bytes; the mod's plugins are written beside it, so it opens again under
 the same hash. **Export as MPQ** writes the MPQ the launchers load. A file nobody changed is written byte for byte as
-it came. An MPQ holds none of the plugins a patcher `.exe` carries in itself, so an `.exe` with such plugins, saved as
-an MPQ, goes by another hash.
+it came. An MPQ runs none of a mod's plugins (no loader loads a plugin from inside one), so Export as MPQ says which
+it leaves out, and a mod with plugins exported as an MPQ goes by another hash. A file its archive lists and does not
+hold is left out, and the status line says which.
 
 **Diff…** reads what changed as a changelog — against the game, or against the mod as it was opened ("Terran Marine:
 hit points 40 → 50"). **Check…** looks across the tables for what would break in the game (a reference past its
 table, an image with no picture, a script no image uses …); click a finding to go to it.
 
-**Play** hands the mod's files that differ from the game's, with the open map, to the play page at `/play/` beside the
-editor (on scmjs.dev), in a tab of its own. A development server of the editor alone has no play page, and the panel
-says so. Its plugins are not handed, so the page keeps those files under their own hash, which answers to the
-editor's too.
+**Play** hands the mod's files that differ from the game's and all of its code, with the open map, to the play page at
+`/play/` beside the editor (on scmjs.dev), in a tab of its own. The code goes as a dropped mod's does: its plugins and
+the libraries they map under `plugins/`, its FireGraft project, and a patcher `.exe` that carries plugins as that
+`.exe` (its archive written again with your edits where you changed a file it holds), so the page runs the same plugins
+in the same order as it does for the mod dropped on it. A mod that is a plugin alone plays too. A development server of
+the editor alone has no play page, and the panel says so. The page keeps the files under their own hash, which answers
+to the editor's too.
 
 While a mod is open and the editor draws from it, the scm-sim plugin (0.19.0 or later) is told where its files are,
 under the mod's hash. A replay of the mod opened in the Aftermath plugin's Game view, Play From Here, Test in Browser
 and a replay's analysis then play with the mod even where the play page has not got it yet: the page is handed the
-mod's files in the game's paths (every file it provides, every module of its code that is in the hash, and its
-FireGraft files) and keeps them, once, under the same hash. Nothing is read until a page says it has not got the mod.
+mod's files in the game's paths (every file it provides, every module of its code that is in the hash — a patcher's
+own plugins inside that patcher, as Play hands them — and its FireGraft files) and keeps them, once, under the same hash. Nothing is read until a page says it has not got the mod.
 Another hash after an edit is registered in its place; closing the mod takes it away.
 
 **Start Test Game** takes Play's place when the scm-sim plugin is installed (its `scm-sim.live` service): the open map —
-or a blank one — is played with the mod in the play page's tab, and while that game runs alone **every edit goes into
+or a blank one — is played with the mod, its code handed as Play hands it, in the play page's tab, and while that game runs alone **every edit goes into
 it**. A table's field is written into the running game between two turns (the marine's hit points, a weapon's damage:
 the next hit takes it); an imported picture is drawn at once; a moved button moves on the card. The animation scripts,
 the sound table and the strings are read by the game once, so those are kept and take effect at the next start (the

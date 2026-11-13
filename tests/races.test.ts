@@ -262,7 +262,7 @@ describe("mod.json", () => {
 
 describe("the play page's hand-over", () => {
   it("carries the races the mod adds beside its name, and none when there are none", () => {
-    const files = [{ name: "arr\\units.dat", bytes: new Uint8Array([1]) }];
+    const files = [{ path: "arr/units.dat", bytes: new Uint8Array([1]) }];
     const named = playMessage({ name: "Made", hash: "0123456789abcdef", files, races: [ASKOSI] }) as { dataSet: { races?: DataSetRace[] } };
     expect(named.dataSet.races).toEqual([ASKOSI]);
     const plain = playMessage({ name: "Made", hash: "0123456789abcdef", files, races: [] }) as { dataSet: Record<string, unknown> };

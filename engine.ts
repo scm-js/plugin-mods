@@ -9,8 +9,9 @@
  * paths (`handedFiles`): every file the mod provides as it is now, every module of its code that has a line in the hash
  * (its plugins and the libraries they map, given as files or carried in a patcher exe) under `plugins/`, and its
  * FireGraft files under `firegraft/`. The page reads them with the same reader, so it names them by the same hash, and
- * a mod whose code runs is kept with its code (Play hands only the files that differ from the game's: kept without its
- * plugins, such a mod would play another game).
+ * a mod whose code runs is kept with its code. A patcher exe's own plugins go inside that program (`handedFiles`), so the
+ * page reads them as the patcher's, in its loader's order. Play and Start Test Game hand the same code, with only the
+ * files that differ from the game's (`playFiles`).
  */
 import type { ModSession } from "./session";
 import { handedFiles } from "./source";
@@ -25,11 +26,26 @@ export interface EngineService {
   provideMod?(hash: string, mod: { name?: string; url?: string; files: () => Promise<EngineFile[]> }): { dispose(): void };
 }
 
-type EngineSession = Pick<ModSession, "members" | "has" | "read" | "nameOf" | "source">;
+type EngineSession = Pick<ModSession, "members" | "has" | "read" | "nameOf" | "source" | "edited">;
 
 /** The open mod's files for the engine: every file it provides as it is now, and its code (`handedFiles`). */
 export async function engineFiles(s: EngineSession): Promise<EngineFile[]> {
-  return handedFiles(s.source, s.members().filter((k) => s.has(k)), (k) => s.read(k), (k) => s.nameOf(k));
+  return handedFiles(s.source, s.members().filter((k) => s.has(k)), (k) => s.read(k), (k) => s.nameOf(k), new Set(await s.edited()));
+}
+
+/**
+ * What Play and Start Test Game hand the play page: the files that differ from the game's (`changedMembers`: all of
+ * them where no copy of the game can say), as they are now, and all of the mod's code, as `engineFiles` hands it — its
+ * plugins and the libraries they map, a patcher exe's own inside that program, its FireGraft project. The page keeps them
+ * as it keeps a dropped mod, and runs the code as it runs a dropped mod's: without it, the mod would play another game.
+ */
+export async function playFiles(s: EngineSession & Pick<ModSession, "changedMembers">): Promise<EngineFile[]> {
+  return handedFiles(s.source, await s.changedMembers(), (k) => s.read(k), (k) => s.nameOf(k), new Set(await s.edited()));
+}
+
+/** The modules of code among handed files, by name: the plugins and libraries under `plugins/` and the programs that carry theirs. */
+export function handedCode(files: readonly EngineFile[]): string[] {
+  return files.filter((f) => /^plugins\/[^/]+\.(qdp|bwl|dll)$/i.test(f.path) || /^[^/]+\.exe$/i.test(f.path)).map((f) => f.path.replace(/^plugins\//, ""));
 }
 
 /**
